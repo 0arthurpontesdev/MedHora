@@ -109,10 +109,10 @@ export function MedsView({
               className="aiScanBtn"
               onClick={onOpenAiScanner}
               disabled={saving}
-              title="Escanear com IA"
+              title="Ler receita com a M.A.R.I.A."
             >
               <Sparkles size={18} />
-              <span>Ler Receita com IA</span>
+              <span>Ler com a M.A.R.I.A.</span>
             </button>
 
             <button
@@ -220,7 +220,7 @@ export function MedsView({
             {editable && !search && filter === 'all' && (
               <div className="emptyActions">
                 <button type="button" className="aiScanBtn" onClick={onOpenAiScanner}>
-                  <Sparkles size={17} /> Ler receita com IA
+                  <Sparkles size={17} /> Ler com a M.A.R.I.A.
                 </button>
                 <button type="button" className="primary" onClick={onAddManual}>
                   <Plus size={17} /> Cadastrar manualmente

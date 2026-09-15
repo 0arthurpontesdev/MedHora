@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { Sparkles, Camera, Upload, AlertCircle, Check, Loader2, X, RefreshCw, Eye } from 'lucide-react';
-import { parsePrescriptionWithGemini } from '../geminiScanner.js';
+import { parsePrescriptionWithMaria } from '../geminiScanner.js';
 import { localDateKey } from '../schedule.js';
 
 export function AiScannerModal({ onClose, onAddMedications }) {
@@ -15,8 +15,12 @@ export function AiScannerModal({ onClose, onAddMedications }) {
 
   const handleFile = (file) => {
     if (!file) return;
-    if (!file.type.startsWith('image/')) {
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
       setError('Por favor, selecione um arquivo de imagem válido (JPG, PNG ou WebP).');
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setError('A imagem é muito grande. Escolha uma foto de até 5 MB.');
       return;
     }
     setError('');
@@ -34,13 +38,15 @@ export function AiScannerModal({ onClose, onAddMedications }) {
     setError('');
     setParsedData(null);
     try {
-      const data = await parsePrescriptionWithGemini(base64, type);
+      const data = await parsePrescriptionWithMaria(base64, type);
       if (!data.medications || data.medications.length === 0) {
         setError('Não foi possível identificar medicamentos legíveis nesta imagem. Tente enviar uma foto mais nítida com melhor iluminação.');
       } else {
         setParsedData(data);
-        // Pre-select all recognized medications
-        setSelectedMeds(data.medications.map((_, idx) => idx));
+        setSelectedMeds(data.medications
+          .map((med, idx) => ({ med, idx }))
+          .filter(({ med }) => !med.needsReview)
+          .map(({ idx }) => idx));
       }
     } catch (err) {
       console.error(err);
@@ -66,16 +72,27 @@ export function AiScannerModal({ onClose, onAddMedications }) {
   const handleConfirm = () => {
     if (!parsedData || selectedMeds.length === 0) return;
 
+    const invalid = selectedMeds.find((idx) => {
+      const m=parsedData.medications[idx];
+      return !m.name?.trim() || !m.dose?.trim() || !m.days || m.scheduleType === 'unknown' ||
+        (m.scheduleType === 'interval' && (![6,8,12,24].includes(Number(m.freq)) || !m.start)) ||
+        (m.scheduleType === 'times' && (!Array.isArray(m.times) || m.times.length === 0));
+    });
+    if (invalid !== undefined) {
+      setError('Revise os campos obrigatórios do medicamento selecionado. Nome, dose, frequência/horário e duração precisam estar confirmados.');
+      return;
+    }
+
     const medsToAdd = selectedMeds.map((idx) => {
       const m = parsedData.medications[idx];
       return {
         name: m.name.trim(),
         dose: m.dose.trim(),
         scheduleType: m.scheduleType || 'interval',
-        freq: m.scheduleType === 'asNeeded' ? 'prn' : String(m.freq || '8'),
+        freq: m.scheduleType === 'asNeeded' ? 'prn' : String(m.freq || ''),
         times: Array.isArray(m.times) ? m.times : [],
-        start: m.start || '08:00',
-        days: String(m.days || 7),
+        start: m.start || '',
+        days: String(m.days || ''),
         date: localDateKey(),
         notes: [m.notes, m.confidenceNotes ? `[IA: ${m.confidenceNotes}]` : '']
           .filter(Boolean)
@@ -94,10 +111,10 @@ export function AiScannerModal({ onClose, onAddMedications }) {
         <div className="modalHead">
           <div className="aiHeadTitle">
             <span className="tag purple">
-              <Sparkles size={14} /> ASSISTENTE DE IA
+              <Sparkles size={14} /> M.A.R.I.A.
             </span>
-            <h2>Ler Receita Médica com IA</h2>
-            <p>Envie uma foto da prescrição, bula ou caixa de remédio para cadastro automático.</p>
+            <h2>Ler receituário com a M.A.R.I.A.</h2>
+            <p>Ela transcreve o que está visível. Você confere tudo antes de cadastrar.</p>
           </div>
           <button type="button" className="closeBtn" onClick={onClose} aria-label="Fechar">
             <X size={20} />
@@ -111,7 +128,7 @@ export function AiScannerModal({ onClose, onAddMedications }) {
                 <Sparkles size={36} />
               </div>
               <h3>Fotografe ou envie a imagem da receita</h3>
-              <p>O Agente Gemini extrairá nome, dosagem, frequência e duração de cada tratamento.</p>
+              <p>A M.A.R.I.A. procurará nome, dose, frequência e duração sem completar dados ausentes.</p>
 
               <div className="aiUploadButtons">
                 <button
@@ -173,8 +190,8 @@ export function AiScannerModal({ onClose, onAddMedications }) {
               {analyzing && (
                 <div className="aiLoadingState">
                   <Loader2 size={40} className="spinner" />
-                  <h4>O Agente de IA está lendo o receituário...</h4>
-                  <p>Decifrando termos médicos, posologia, duração e horários de tomada.</p>
+                  <h4>A M.A.R.I.A. está lendo o receituário...</h4>
+                  <p>Transcrevendo os dados visíveis para você conferir.</p>
                 </div>
               )}
 
@@ -214,7 +231,7 @@ export function AiScannerModal({ onClose, onAddMedications }) {
                   <div className="aiListHeader">
                     <div>
                       <h3>Medicamentos Identificados ({parsedData.medications.length})</h3>
-                      <p>Revise os detalhes antes de adicionar à sua rotina:</p>
+                      <p>Revise cada detalhe. Itens com dúvida começam desmarcados.</p>
                     </div>
                   </div>
 
@@ -234,7 +251,9 @@ export function AiScannerModal({ onClose, onAddMedications }) {
                             />
                             <strong>{med.name}</strong>
                           </label>
-                          <span className="tag green">{med.days ? `${med.days} dias` : 'Contínuo'}</span>
+                          <span className={`tag ${med.needsReview ? 'amber' : 'green'}`}>
+                            {med.needsReview ? 'Precisa de revisão' : `${med.days} dias`}
+                          </span>
                         </div>
 
                         <div className="aiMedForm">
@@ -263,6 +282,7 @@ export function AiScannerModal({ onClose, onAddMedications }) {
                                 value={med.scheduleType}
                                 onChange={(e) => updateMedField(idx, 'scheduleType', e.target.value)}
                               >
+                                <option value="unknown">Selecione após conferir</option>
                                 <option value="interval">Intervalo de horas</option>
                                 <option value="times">Horários fixos</option>
                                 <option value="asNeeded">Se necessário (SOS)</option>
@@ -273,9 +293,10 @@ export function AiScannerModal({ onClose, onAddMedications }) {
                               <div className="aiField">
                                 <label>Intervalo</label>
                                 <select
-                                  value={med.freq || '8'}
+                                  value={med.freq || ''}
                                   onChange={(e) => updateMedField(idx, 'freq', e.target.value)}
                                 >
+                                  <option value="">Selecione</option>
                                   <option value="6">A cada 6 horas</option>
                                   <option value="8">A cada 8 horas</option>
                                   <option value="12">A cada 12 horas</option>
@@ -290,15 +311,40 @@ export function AiScannerModal({ onClose, onAddMedications }) {
                                 type="number"
                                 min="1"
                                 max="365"
-                                value={med.days || 7}
+                                value={med.days || ''}
                                 onChange={(e) => updateMedField(idx, 'days', e.target.value)}
                               />
                             </div>
                           </div>
 
+                          {med.scheduleType === 'interval' && (
+                            <div className="aiField">
+                              <label>Primeiro horário</label>
+                              <input type="time" value={med.start || ''} onChange={(e) => updateMedField(idx, 'start', e.target.value)} />
+                            </div>
+                          )}
+
+                          {med.scheduleType === 'times' && (
+                            <div className="aiField">
+                              <label>Horários separados por vírgula</label>
+                              <input
+                                type="text"
+                                value={(med.times || []).join(', ')}
+                                placeholder="08:00, 14:00, 20:00"
+                                onChange={(e) => updateMedField(idx, 'times', e.target.value.split(',').map(v => v.trim()).filter(Boolean))}
+                              />
+                            </div>
+                          )}
+
                           {med.notes && (
                             <div className="aiNotesBox">
                               <span>Instrução da receita: {med.notes}</span>
+                            </div>
+                          )}
+                          {(med.confidenceNotes || med.sourceText) && (
+                            <div className="aiNotesBox warning">
+                              {med.sourceText && <span>Trecho lido: “{med.sourceText}”</span>}
+                              {med.confidenceNotes && <span>Confira: {med.confidenceNotes}</span>}
                             </div>
                           )}
                         </div>
@@ -323,7 +369,7 @@ export function AiScannerModal({ onClose, onAddMedications }) {
               onClick={handleConfirm}
             >
               <Check size={18} />
-              Cadastrar {selectedMeds.length} medicamento{selectedMeds.length !== 1 ? 's' : ''}
+              Conferi e quero cadastrar {selectedMeds.length}
             </button>
           )}
         </div>

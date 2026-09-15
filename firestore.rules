@@ -58,7 +58,8 @@ service cloud.firestore {
     function isValidUser(data, userId) {
       return hasRequiredFields(data,['uid','email','displayName','createdAt','updatedAt']) &&
         hasOnlyAllowedFields(data,['uid','email','displayName','createdAt','updatedAt']) &&
-        data.uid == userId && isValidEmail(data.email) &&
+        data.uid == userId && request.auth.token.email_verified == true &&
+        data.email == request.auth.token.email && isValidEmail(data.email) &&
         data.displayName is string && data.displayName.size() <= 120 &&
         data.createdAt is timestamp && data.updatedAt is timestamp;
     }
@@ -115,10 +116,14 @@ service cloud.firestore {
         data.inviteId is string && data.inviteId.size() == 20 && data.joinedAt is timestamp;
     }
     function isValidPushToken(data,userId) {
-      return hasRequiredFields(data,['ownerUid','token','enabled','platform','createdAt','updatedAt']) &&
-        hasOnlyAllowedFields(data,['ownerUid','token','enabled','platform','createdAt','updatedAt']) &&
+      return hasRequiredFields(data,['ownerUid','token','enabled','platform','deviceUid','pairId','createdAt','updatedAt']) &&
+        hasOnlyAllowedFields(data,['ownerUid','token','enabled','platform','deviceUid','pairId','createdAt','updatedAt']) &&
         data.ownerUid == userId && data.token is string && data.token.size() >= 20 && data.token.size() <= 4096 &&
         data.enabled is bool && data.platform is string && data.platform.size() <= 300 &&
+        data.deviceUid == request.auth.uid && data.deviceUid.size() >= 20 && data.deviceUid.size() <= 128 &&
+        data.pairId is string && data.pairId.size() <= 64 &&
+        ((isOwner(userId) && data.pairId == '') ||
+         (isPairedDevice(userId) && data.pairId == get(/databases/$(database)/documents/users/$(userId)/devices/$(request.auth.uid)).data.pairId)) &&
         data.createdAt is timestamp && data.updatedAt is timestamp;
     }
     function isValidControl(data) {
@@ -182,6 +187,7 @@ service cloud.firestore {
         allow read: if isOwner(userId) || (isAuthenticated() && request.auth.uid == memberUid);
         allow create: if isAuthenticated() && request.auth.uid == memberUid &&
           isValidMember(request.resource.data,memberUid) && request.resource.data.email == request.auth.token.email &&
+          get(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.status == 'pending' &&
           getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.ownerUid == userId &&
           getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.acceptedUid == memberUid;
         allow update: if false;
@@ -190,6 +196,7 @@ service cloud.firestore {
       match /connections/{ownerUid} {
         allow read: if isOwner(userId);
         allow create: if isOwner(userId) && isValidConnection(request.resource.data,ownerUid) &&
+          get(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.status == 'pending' &&
           getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.ownerUid == ownerUid &&
           getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.acceptedUid == userId;
         allow update: if false;
@@ -198,6 +205,7 @@ service cloud.firestore {
       match /dependents/{dependentUid} {
         allow read: if isOwner(userId);
         allow create: if isAuthenticated() && request.auth.uid == dependentUid && isValidDependent(request.resource.data,dependentUid) &&
+          get(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.status == 'pending' &&
           getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.mode == 'dependent' &&
           getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.ownerUid == userId &&
           getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.acceptedUid == dependentUid;
@@ -207,6 +215,7 @@ service cloud.firestore {
       match /control/{controlId} {
         allow read: if controlId == 'access' && (isOwner(userId) || isGuardian(userId));
         allow create: if controlId == 'access' && isOwner(userId) && isValidControl(request.resource.data) &&
+          get(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.status == 'pending' &&
           getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.mode == 'dependent' &&
           getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.ownerUid == request.resource.data.guardianUid &&
           getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.acceptedUid == userId;
@@ -216,6 +225,8 @@ service cloud.firestore {
       match /devices/{deviceUid} {
         allow read: if isOwner(userId) || (isAuthenticated() && request.auth.uid == deviceUid);
         allow create: if isAuthenticated() && request.auth.uid == deviceUid && isValidDevice(request.resource.data,deviceUid) &&
+          get(/databases/$(database)/documents/pairings/$(request.resource.data.pairId)).data.status == 'pending' &&
+          get(/databases/$(database)/documents/pairings/$(request.resource.data.pairId)).data.expiresAt > request.time &&
           getAfter(/databases/$(database)/documents/pairings/$(request.resource.data.pairId)).data.ownerUid == userId &&
           getAfter(/databases/$(database)/documents/pairings/$(request.resource.data.pairId)).data.status == 'claimed' &&
           getAfter(/databases/$(database)/documents/pairings/$(request.resource.data.pairId)).data.claimedUid == deviceUid;

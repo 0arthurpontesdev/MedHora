@@ -1,4 +1,5 @@
 import {initializeApp} from 'firebase/app';
+import {initializeAppCheck, ReCaptchaEnterpriseProvider} from 'firebase/app-check';
 import {getAuth, GoogleAuthProvider} from 'firebase/auth';
 import {getFirestore} from 'firebase/firestore';
 
@@ -12,6 +13,13 @@ const firebaseConfig = {
 };
 
 export const firebaseApp = initializeApp(firebaseConfig);
+const appCheckSiteKey=import.meta.env.VITE_FIREBASE_APP_CHECK_SITE_KEY;
+if(typeof window!=='undefined'&&appCheckSiteKey){
+  initializeAppCheck(firebaseApp,{
+    provider:new ReCaptchaEnterpriseProvider(appCheckSiteKey),
+    isTokenAutoRefreshEnabled:true,
+  });
+}
 export const auth = getAuth(firebaseApp);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({prompt:'select_account'});

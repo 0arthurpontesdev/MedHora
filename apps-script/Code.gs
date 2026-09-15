@@ -4,6 +4,8 @@ const TIME_ZONE = 'America/Fortaleza';
 const SITE_URL = 'https://medhora-familia.web.app';
 const REMINDER_LEAD_MINUTES = 5;
 const REMINDER_CATCH_UP_MINUTES = 2;
+const DAILY_REMINDERS_PER_USER = 24;
+const DAILY_REMINDERS_TOTAL = 72;
 
 function setup() {
   ScriptApp.getProjectTriggers()
@@ -115,6 +117,10 @@ function sendReminder_(uid, med, at, channels) {
   const doseKey = `${localDate}-${med.id}-${localHour * 60 + localMinute}`;
   const deliveryUrl = `${FIRESTORE_ROOT}/users/${encodeURIComponent(uid)}/deliveries/${encodeURIComponent(doseKey)}`;
   if (!claimDelivery_(deliveryUrl)) return;
+  if (!claimReminderBudget_(uid)) {
+    updateDelivery_(deliveryUrl, 'suppressed', 'Limite diário preventivo atingido.');
+    return;
+  }
   try {
     const time = Utilities.formatDate(new Date(at), TIME_ZONE, "dd/MM/yyyy 'às' HH:mm");
     const clock = Utilities.formatDate(new Date(at), TIME_ZONE, 'HH:mm');
@@ -153,7 +159,35 @@ function pushTokensFor_(uid) {
   });
   if (response.getResponseCode() !== 200) return [];
   const payload = JSON.parse(response.getContentText());
-  return (payload.documents || []).map(doc => decodeFields_(doc.fields)).filter(item => item.enabled === true && item.token).map(item => item.token);
+  return (payload.documents || [])
+    .map(doc => decodeFields_(doc.fields))
+    .filter(item => item.enabled === true && item.token && pushTokenAuthorized_(uid,item))
+    .map(item => item.token);
+}
+
+function pushTokenAuthorized_(uid,item) {
+  if (item.deviceUid === uid && item.pairId === '') return true;
+  if (!item.deviceUid || !item.pairId) return false;
+  const response=UrlFetchApp.fetch(`${FIRESTORE_ROOT}/users/${encodeURIComponent(uid)}/devices/${encodeURIComponent(item.deviceUid)}`, {
+    headers:authHeaders_(),muteHttpExceptions:true,
+  });
+  if(response.getResponseCode()!==200)return false;
+  const device=decodeFields_(JSON.parse(response.getContentText()).fields);
+  return device.pairId===item.pairId;
+}
+
+function claimReminderBudget_(uid) {
+  const properties=PropertiesService.getScriptProperties();
+  const date=Utilities.formatDate(new Date(),TIME_ZONE,'yyyy-MM-dd');
+  const key=`reminder-budget-${date}`;
+  let budget={total:0,users:{}};
+  try { budget=JSON.parse(properties.getProperty(key)||JSON.stringify(budget)); } catch (_) {}
+  const userCount=Number(budget.users[uid]||0);
+  if(Number(budget.total||0)>=DAILY_REMINDERS_TOTAL||userCount>=DAILY_REMINDERS_PER_USER)return false;
+  budget.total=Number(budget.total||0)+1;
+  budget.users[uid]=userCount+1;
+  properties.setProperty(key,JSON.stringify(budget));
+  return true;
 }
 
 function sendPush_(token, med, clock) {

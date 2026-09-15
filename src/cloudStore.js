@@ -1,6 +1,6 @@
 import {
-  collection, deleteDoc, doc, getDoc, onSnapshot, serverTimestamp, setDoc,
-  Timestamp, updateDoc, writeBatch
+  collection, deleteDoc, doc, getDoc, getDocs, onSnapshot, query, serverTimestamp, setDoc,
+  Timestamp, updateDoc, where, writeBatch
 } from 'firebase/firestore';
 import {db} from './firebase.js';
 
@@ -131,16 +131,24 @@ export async function acceptFamilyInvite(user,inviteIdInput) {
 }
 
 export async function removeDependent(user,dependentUid) {
+  const dependentRef=child(user,'dependents',dependentUid);
+  const dependent=await getDoc(dependentRef);
   const batch=writeBatch(db);
-  batch.delete(child(user,'dependents',dependentUid));
+  batch.delete(dependentRef);
   batch.delete(doc(db,'users',dependentUid,'control','access'));
+  const inviteId=dependent.data()?.inviteId;
+  if(inviteId)batch.delete(doc(db,'invitations',inviteId));
   await batch.commit();
 }
 
 export async function removeMember(user,memberUid) {
+  const memberRef=child(user,'members',memberUid);
+  const member=await getDoc(memberRef);
   const batch=writeBatch(db);
-  batch.delete(child(user,'members',memberUid));
+  batch.delete(memberRef);
   batch.delete(ownerChild(memberUid,'connections',user.uid));
+  const inviteId=member.data()?.inviteId;
+  if(inviteId)batch.delete(doc(db,'invitations',inviteId));
   await batch.commit();
 }
 export async function leaveSharedAgenda(user,ownerUid) {
@@ -160,7 +168,13 @@ export async function savePushToken(user,token) {
 export async function savePushTokenForOwner(user,token,ownerUid) {
   const id=await sha256(token);
   const ref=ownerChild(ownerUid,'pushTokens',id);const snapshot=await getDoc(ref);
-  const data={ownerUid,token,enabled:true,platform:navigator.userAgent.slice(0,300),updatedAt:serverTimestamp()};
+  let pairId='';
+  if(ownerUid!==user.uid){
+    const device=await getDoc(ownerChild(ownerUid,'devices',user.uid));
+    if(!device.exists())throw new Error('Este aparelho não está mais autorizado.');
+    pairId=device.data().pairId||'';
+  }
+  const data={ownerUid,token,enabled:true,platform:navigator.userAgent.slice(0,300),deviceUid:user.uid,pairId,updatedAt:serverTimestamp()};
   if(snapshot.exists())await updateDoc(ref,data);
   else await setDoc(ref,{...data,createdAt:serverTimestamp()});
 }
@@ -197,4 +211,14 @@ export async function claimDevicePairing(user,pairIdInput) {
 export function subscribePairedDevices(user,onState,onError) {
   return onSnapshot(collection(db,'users',user.uid,'devices'),snap=>onState(snap.docs.map(item=>item.data())),onError);
 }
-export const removePairedDevice=(user,deviceUid)=>deleteDoc(child(user,'devices',deviceUid));
+export async function removePairedDevice(user,deviceUid) {
+  const deviceRef=child(user,'devices',deviceUid);
+  const device=await getDoc(deviceRef);
+  const tokens=await getDocs(query(collection(db,'users',user.uid,'pushTokens'),where('deviceUid','==',deviceUid)));
+  const batch=writeBatch(db);
+  tokens.docs.forEach(token=>batch.delete(token.ref));
+  batch.delete(deviceRef);
+  const pairId=device.data()?.pairId;
+  if(pairId)batch.delete(doc(db,'pairings',pairId));
+  await batch.commit();
+}

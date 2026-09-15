@@ -58,7 +58,8 @@ import {
 } from './cloudStore.js';
 import { activatePushNotifications, listenForForegroundMessages } from './push.js';
 import { MedsView } from './components/MedsView.jsx';
-import { AiScannerModal } from './components/AiScannerModal.jsx';
+
+const AiScannerModal=React.lazy(()=>import('./components/AiScannerModal.jsx').then(module=>({default:module.AiScannerModal})));
 
 const SITE_URL = 'https://medhora-familia.web.app';
 const fmtMinutes = (m) => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
@@ -240,7 +241,7 @@ function App({ user, onSignOut, pairedAccess }) {
         await addMedication(user, medData, ownerUid);
         count++;
       }
-      setMessage(`Sucesso! ${count} medicamento(s) cadastrado(s) a partir da receita com IA.`);
+      setMessage(`Sucesso! ${count} medicamento(s) cadastrado(s) com a M.A.R.I.A.`);
     } catch (e) {
       setMessage(`Cadastrados ${count} medicamento(s). Erro: ${e.message || 'Falha ao salvar medicamento.'}`);
     } finally {
@@ -450,7 +451,7 @@ function App({ user, onSignOut, pairedAccess }) {
                       onClick={() => setAiModalOpen(true)}
                     >
                       <Sparkles size={18} />
-                      <span>Ler Receita com IA</span>
+                      <span>Ler com a M.A.R.I.A.</span>
                     </button>
 
                     <button
@@ -654,10 +655,12 @@ function App({ user, onSignOut, pairedAccess }) {
       )}
 
       {aiModalOpen && (
-        <AiScannerModal
-          onClose={() => setAiModalOpen(false)}
-          onAddMedications={handleAddMultipleMeds}
-        />
+        <React.Suspense fallback={<div className="backdrop"><div className="panel">Carregando a M.A.R.I.A...</div></div>}>
+          <AiScannerModal
+            onClose={() => setAiModalOpen(false)}
+            onAddMedications={handleAddMultipleMeds}
+          />
+        </React.Suspense>
       )}
     </div>
   );
@@ -774,7 +777,7 @@ function MedicationList({ meds, editable, saving, onEdit, onStatus, onRemove, on
               onClick={onOpenAi}
               title="Ler receita médica com Inteligência Artificial"
             >
-              <Sparkles size={14} /> IA
+              <Sparkles size={14} /> M.A.R.I.A.
             </button>
           )}
         </div>
@@ -789,7 +792,7 @@ function MedicationList({ meds, editable, saving, onEdit, onStatus, onRemove, on
                   + Cadastrar manual
                 </button>
                 <button type="button" className="aiScanBtn small" onClick={onOpenAi}>
-                  <Sparkles size={14} /> Ler com IA
+                  <Sparkles size={14} /> Ler com a M.A.R.I.A.
                 </button>
               </div>
             )}
