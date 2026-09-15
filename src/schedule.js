@@ -44,3 +44,89 @@ export function dosesBetween(meds, from, until, options={}) {
   }
   return result.sort((a,b) => a.at-b.at);
 }
+
+export function getMedicationDurationInfo(med, now = new Date()) {
+  const status = medicationStatus(med);
+  if (status !== 'active') {
+    return {
+      statusText: status === 'paused' ? 'Pausado' : 'Encerrado',
+      badgeClass: 'status-inactive',
+      daysLeft: 0,
+      isContinuous: false,
+      isFinished: true,
+      endDateFormatted: null
+    };
+  }
+
+  const daysTotal = Number(med.days) || 0;
+  // If days >= 365 or not specified or 0, treat as continuous treatment
+  if (!daysTotal || daysTotal >= 365) {
+    return {
+      statusText: 'Uso contínuo',
+      badgeClass: 'status-continuous',
+      daysLeft: Infinity,
+      isContinuous: true,
+      isFinished: false,
+      endDateFormatted: null
+    };
+  }
+
+  // Calculate start date
+  let startDate = null;
+  if (med.date) {
+    startDate = new Date(`${med.date}T00:00:00`);
+  } else if (med.startsAt) {
+    startDate = new Date(med.startsAt);
+  } else if (med.created) {
+    startDate = new Date(med.created);
+  }
+
+  if (!startDate || isNaN(+startDate)) {
+    startDate = new Date(now);
+  }
+
+  const endDate = new Date(startDate);
+  endDate.setDate(endDate.getDate() + daysTotal);
+
+  const todayStart = new Date(now);
+  todayStart.setHours(0, 0, 0, 0);
+
+  const endDayStart = new Date(endDate);
+  endDayStart.setHours(0, 0, 0, 0);
+
+  const msPerDay = 86400000;
+  const diffDays = Math.ceil((endDayStart.getTime() - todayStart.getTime()) / msPerDay);
+
+  const endDateFormatted = new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' }).format(endDate);
+
+  if (diffDays <= 0) {
+    return {
+      statusText: 'Tratamento concluído',
+      badgeClass: 'status-finished',
+      daysLeft: 0,
+      isContinuous: false,
+      isFinished: true,
+      endDateFormatted
+    };
+  }
+
+  if (diffDays === 1) {
+    return {
+      statusText: 'Último dia hoje!',
+      badgeClass: 'status-warning',
+      daysLeft: 1,
+      isContinuous: false,
+      isFinished: false,
+      endDateFormatted
+    };
+  }
+
+  return {
+    statusText: `Restam ${diffDays} dias`,
+    badgeClass: diffDays <= 3 ? 'status-warning' : 'status-active',
+    daysLeft: diffDays,
+    isContinuous: false,
+    isFinished: false,
+    endDateFormatted
+  };
+}

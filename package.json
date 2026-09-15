@@ -4,7 +4,7 @@
   "version": "2.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --host 0.0.0.0 --port 3000",
     "build": "vite build",
     "preview": "vite preview",
     "server": "node server.mjs",
@@ -13,6 +13,7 @@
     "email:test": "node email-check.mjs --send"
   },
   "dependencies": {
+    "@google/genai": "^2.22.0",
     "firebase": "^12.19.0",
     "lucide-react": "^0.468.0",
     "nodemailer": "^10.0.10",
@@ -25,6 +26,6 @@
     "vite": "^6.0.1"
   },
   "engines": {
-    "node": ">=24.14.0"
+    "node": ">=20.0.0"
   }
 }

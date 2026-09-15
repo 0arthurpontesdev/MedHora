@@ -1,0 +1,6 @@
+{
+  "name": "MedHora Família",
+  "description": "Agenda pessoal e familiar de medicamentos com lembretes, histórico de doses e controle de tratamentos",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
