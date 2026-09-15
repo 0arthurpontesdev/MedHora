@@ -1188,7 +1188,7 @@ button:disabled {
   height: 100%;
 }
 
-.backdrop:not([open]) {
+dialog.backdrop:not([open]) {
   display: none;
 }
 
