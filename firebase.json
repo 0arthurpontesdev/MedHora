@@ -1,0 +1,43 @@
+{
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "auth": {
+    "authorizedDomains": [
+      "localhost",
+      "minha-medicacao-arthur-2026.web.app",
+      "medhora-familia.web.app",
+      "minha-medicacao-arthur-2026.firebaseapp.com"
+    ],
+    "providers": {
+      "googleSignIn": {
+        "oAuthBrandDisplayName": "Minha Medicação",
+        "supportEmail": "0arthurpontesdev@gmail.com"
+      }
+    }
+  },
+  "hosting": {
+    "site": "medhora-familia",
+    "public": "dist",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "rewrites": [{"source": "**", "destination": "/index.html"}],
+    "cleanUrls": true,
+    "trailingSlash": false,
+    "headers": [{
+      "source": "/index.html",
+      "headers": [{"key": "Cache-Control", "value": "no-cache, no-store, must-revalidate"}]
+    }, {
+      "source": "/firebase-messaging-sw.js",
+      "headers": [{"key": "Cache-Control", "value": "no-cache, no-store, must-revalidate"}]
+    }, {
+      "source": "**",
+      "headers": [
+        {"key": "X-Content-Type-Options", "value": "nosniff"},
+        {"key": "Referrer-Policy", "value": "strict-origin-when-cross-origin"},
+        {"key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=()"}
+      ]
+    }]
+  },
+  "functions": [{"source": "functions", "codebase": "default", "ignore": ["node_modules", ".git", "firebase-debug.log", "*.local"]}]
+}

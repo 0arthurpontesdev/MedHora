@@ -1,0 +1,30 @@
+{
+  "name": "minha-medicacao",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "server": "node server.mjs",
+    "test": "node --test src/*.test.js tests/*.test.mjs",
+    "email:verify": "node email-check.mjs",
+    "email:test": "node email-check.mjs --send"
+  },
+  "dependencies": {
+    "firebase": "^12.19.0",
+    "lucide-react": "^0.468.0",
+    "nodemailer": "^10.0.10",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.1"
+  },
+  "engines": {
+    "node": ">=24.14.0"
+  }
+}
