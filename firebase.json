@@ -6,6 +6,7 @@
   "auth": {
     "authorizedDomains": [
       "localhost",
+      "127.0.0.1",
       "minha-medicacao-arthur-2026.web.app",
       "medhora-familia.web.app",
       "minha-medicacao-arthur-2026.firebaseapp.com"

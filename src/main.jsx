@@ -1383,6 +1383,7 @@ function Login() {
         new Promise((_, r) => setTimeout(() => r({ code: 'auth/popup-timeout' }), 12000))
       ]);
     } catch (cause) {
+      console.error('Falha ao autenticar com Google:', cause);
       if (
         ['auth/popup-blocked', 'auth/operation-not-supported-in-this-environment', 'auth/popup-timeout'].includes(
           cause?.code
@@ -1391,9 +1392,15 @@ function Login() {
         try {
           await signInWithRedirect(auth, googleProvider);
           return;
-        } catch {}
+        } catch (redirectErr) {
+          console.error('Falha no signInWithRedirect:', redirectErr);
+        }
       }
-      setError('Não foi possível entrar com o Google. Tente abrir no Chrome, Edge ou Safari.');
+      if (cause?.code === 'auth/unauthorized-domain') {
+        setError('Domínio não autorizado pelo Firebase. Ao testar localmente, acesse por http://localhost:5173');
+      } else {
+        setError(cause?.message || 'Não foi possível entrar com o Google. Tente abrir no Chrome, Edge ou Safari.');
+      }
       setBusy(false);
     }
   }
