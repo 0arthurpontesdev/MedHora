@@ -8,8 +8,17 @@ Agenda pessoal de medicamentos publicada no Firebase. Cada pessoa entra com a pr
 
 O site e o banco Firestore já estão publicados no projeto `minha-medicacao-arthur-2026`. O login Google e as regras privadas por usuário também estão configurados.
 
+## Projeto separado da M.A.R.I.A.
+
+A conversa com a M.A.R.I.A. e a leitura de receituários usam o projeto Firebase secundário `medhora-maria-arthur-2026`. O restante do sistema continua no projeto principal `minha-medicacao-arthur-2026`: login, Firestore, agenda, histórico, família, notificações e hospedagem.
+
+Essa separação permite vincular somente a M.A.R.I.A. ao plano Blaze e acompanhar seus gastos isoladamente. A aplicação inicializa o projeto secundário como um segundo Firebase App chamado `medhora-maria`; ele não cria outra sessão de login nem duplica os dados do usuário.
+
+As variáveis `VITE_MARIA_FIREBASE_*` em `.env.example` permitem substituir a configuração do projeto secundário. `VITE_MARIA_FIREBASE_APP_CHECK_SITE_KEY` deve receber a chave do reCAPTCHA Enterprise configurada no App Check antes de exigir tokens em produção.
+
 ## O que já funciona
 
+- Landing page pública com apresentação dos recursos, segurança, termos e política de privacidade.
 - Login individual com Google.
 - Cadastro de medicamento, dose, primeira data e horário, frequência de 6, 8, 12 ou 24 horas e duração do tratamento.
 - Cadastro de medicamentos para uso quando necessário, sem gerar alertas em horários inventados.
@@ -24,6 +33,14 @@ O site e o banco Firestore já estão publicados no projeto `minha-medicacao-art
 - E-mail com link direto para abrir a agenda e registrar a dose.
 - Lembretes gratuitos cerca de 5 minutos antes do horário, verificados pelo Google Apps Script a cada minuto.
 - Notificações push pelo Firebase Cloud Messaging, inclusive com o site fechado após a ativação no aparelho.
+- Aplicativo instalável com cache básico da interface e aviso quando o aparelho fica sem internet.
+- Onboarding para orientar o primeiro cadastro e a configuração dos lembretes.
+
+## Qualidade e monitoramento
+
+Use `npm run check` para executar todos os testes e gerar o build de produção. O mesmo comando é executado automaticamente no GitHub Actions.
+
+Erros inesperados são preservados localmente no navegador. Para encaminhá-los a um serviço de observabilidade, configure `VITE_ERROR_REPORTING_ENDPOINT` com um endpoint HTTPS que aceite eventos JSON.
 
 ## E-mail automático gratuito
 

@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "server": "node server.mjs",
     "test": "node --test src/*.test.js tests/*.test.mjs",
+    "check": "npm run test && npm run build",
     "email:verify": "node email-check.mjs",
     "email:test": "node email-check.mjs --send"
   },

@@ -22,15 +22,20 @@ function medicationFromSnapshot(item) {
     scheduleType:value.asNeeded ? 'asNeeded' : (value.scheduleType || 'interval'),
     times:Array.isArray(value.times) ? value.times : [],
     startsAt:value.startsAt?.toDate?.().toISOString() || value.startsAt,
+    scheduleAnchorAt:value.scheduleAnchorAt?.toDate?.().toISOString() || value.scheduleAnchorAt || value.startsAt?.toDate?.().toISOString() || value.startsAt,
     created:value.createdAt?.toDate?.().toISOString() || '',
   };
 }
 
 function subscribeOwnerAgenda(ownerUid,onState,onError) {
-  let meds=[],taken={};const emit=()=>onState({meds,taken});
+  let meds=[],taken={},doseRecords={};const emit=()=>onState({meds,taken,doseRecords});
   const stops=[
     onSnapshot(collection(db,'users',ownerUid,'medications'),snap=>{meds=snap.docs.map(medicationFromSnapshot);emit();},onError),
-    onSnapshot(collection(db,'users',ownerUid,'doses'),snap=>{taken=Object.fromEntries(snap.docs.map(item=>[item.id,item.data().taken===true]));emit();},onError),
+    onSnapshot(collection(db,'users',ownerUid,'doses'),snap=>{
+      taken=Object.fromEntries(snap.docs.map(item=>[item.id,item.data().taken===true]));
+      doseRecords=Object.fromEntries(snap.docs.map(item=>{const value=item.data();return [item.id,{...value,scheduledAt:value.scheduledAt?.toDate?.().toISOString()||value.scheduledAt||'',takenAt:value.takenAt?.toDate?.().toISOString()||value.takenAt||value.updatedAt?.toDate?.().toISOString()||'',updatedAt:value.updatedAt?.toDate?.().toISOString()||''}];}));
+      emit();
+    },onError),
   ];
   return ()=>stops.forEach(stop=>stop());
 }
@@ -53,10 +58,12 @@ function medicationFields(data) {
     : [];
   const start=scheduleType==='times'?(times[0]||'00:00'):scheduleType==='asNeeded'?'00:00':data.start;
   const startsAt=new Date(`${data.date}T${start}`);
+  const suppliedAnchor=new Date(data.scheduleAnchorAt||startsAt);
+  const scheduleAnchorAt=Number.isFinite(+suppliedAnchor)?suppliedAnchor:startsAt;
   return {
-    name:data.name.trim(),dose:data.dose.trim(),notes:(data.notes||'').trim(),start,date:data.date,
+    name:String(data.name||'').trim(),dose:String(data.dose||'').trim(),notes:String(data.notes||'').trim(),start,date:data.date,
     freq:scheduleType==='interval'?Number(data.freq):0,asNeeded,scheduleType,times,
-    status:data.status||'active',days:Number(data.days),startsAt:Timestamp.fromDate(startsAt),updatedAt:serverTimestamp(),
+    status:data.status||'active',days:Math.max(0,Number(data.days)||0),startsAt:Timestamp.fromDate(startsAt),scheduleAnchorAt:Timestamp.fromDate(scheduleAnchorAt),updatedAt:serverTimestamp(),
   };
 }
 
@@ -68,9 +75,23 @@ export async function updateMedication(user,id,data,ownerUid=user.uid) {
   await updateDoc(ownerChild(ownerUid,'medications',id),medicationFields(data));
 }
 export const removeMedication=(user,id,ownerUid=user.uid)=>deleteDoc(ownerChild(ownerUid,'medications',id));
-export async function setDoseTaken(user,doseKey,taken,ownerUid=user.uid) {
+export async function setDoseTaken(user,doseKey,taken,ownerUid=user.uid,details={}) {
   const ref=ownerChild(ownerUid,'doses',doseKey);
-  if(taken) await setDoc(ref,{doseKey,ownerUid,taken:true,updatedAt:serverTimestamp()});
+  if(taken) {
+    const scheduledDate=new Date(details.scheduledAt||Date.now());
+    const takenDate=new Date(details.takenAt||Date.now());
+    await setDoc(ref,{
+      doseKey,ownerUid,taken:true,
+      medicationId:String(details.medicationId||'').slice(0,100),
+      medicationName:String(details.medicationName||'Medicamento').slice(0,120),
+      scheduledAt:Timestamp.fromDate(Number.isFinite(+scheduledDate)?scheduledDate:new Date()),
+      takenAt:Timestamp.fromDate(Number.isFinite(+takenDate)?takenDate:new Date()),
+      outOfSchedule:details.outOfSchedule===true,
+      scheduleAdjusted:details.scheduleAdjusted===true,
+      takenByUid:user.uid,
+      updatedAt:serverTimestamp(),
+    });
+  }
   else await deleteDoc(ref);
 }
 
@@ -81,53 +102,93 @@ export function subscribeMembers(user,onState,onError) {
   return onSnapshot(collection(db,'users',user.uid,'members'),snap=>onState(snap.docs.map(item=>item.data())),onError);
 }
 
-export async function createFamilyInvite(user,invitedEmail,mode='viewer',birthDate='') {
-  const inviteId=crypto.randomUUID().replaceAll('-','').slice(0,20).toUpperCase();
+export async function createFamilyInvite(user,invitedEmail,mode='viewer',birthDate='',elderSelfManage=true,deliveryMethod='email') {
+  const invited=String(invitedEmail||'').trim().toLowerCase(),accountType=mode==='dependent'?'minor':mode;
+  if(!/^[^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;]+$/.test(invited))throw new Error('Informe um e-mail válido.');
+  if(invited===(user.email||'').toLowerCase())throw new Error('Use o e-mail de outra pessoa da família.');
+  if(!['adult','elderly','minor'].includes(accountType))throw new Error('Escolha um tipo de conta válido.');
   let adultAt=Timestamp.fromDate(new Date());
-  if(mode==='dependent'){
-    const birth=new Date(`${birthDate}T12:00:00`);
-    if(!birthDate||Number.isNaN(birth.getTime()))throw new Error('Informe a data de nascimento do menor.');
-    const adult=new Date(birth);adult.setFullYear(adult.getFullYear()+18);
-    if(adult<=new Date())throw new Error('O modo dependente é somente para menores de 18 anos.');
+  if(accountType==='minor'){
+    const birth=new Date(`${birthDate}T12:00:00`),adult=new Date(birth);adult.setFullYear(adult.getFullYear()+18);
+    if(!birthDate||Number.isNaN(+birth)||adult<=new Date())throw new Error('Informe a data de nascimento de uma pessoa menor de 18 anos.');
     adultAt=Timestamp.fromDate(adult);
   }
-  await setDoc(doc(db,'invitations',inviteId),{
-    inviteId,ownerUid:user.uid,ownerName:(user.displayName||'Familiar').slice(0,120),
-    invitedEmail:invitedEmail.trim().toLowerCase(),status:'pending',acceptedUid:'',mode,birthDate,adultAt,
-    createdAt:serverTimestamp(),updatedAt:serverTimestamp(),
-  });
-  return inviteId;
+  const accountRef=child(user,'family','account'),accountSnap=await getDoc(accountRef);
+  if(accountSnap.data()?.accountType==='minor')throw new Error('Contas de menores não podem convidar familiares.');
+  const familyOwnerUid=accountSnap.data()?.familyOwnerUid||user.uid;
+  if(accountSnap.exists()&&familyOwnerUid!==user.uid)throw new Error('Somente o administrador da família pode enviar convites.');
+  if(!['email','link'].includes(deliveryMethod))throw new Error('Escolha uma forma de envio válida.');
+  const nowStamp=serverTimestamp(),ownerName=(user.displayName||user.email||'Familiar').slice(0,120);
+  let guardianName=ownerName;
+  if(!accountSnap.exists()){
+    const setup=writeBatch(db);
+    setup.set(doc(db,'families',familyOwnerUid),{familyOwnerUid,ownerName,createdAt:nowStamp,updatedAt:nowStamp});
+    setup.set(doc(db,'families',familyOwnerUid,'members',user.uid),{uid:user.uid,displayName:ownerName,email:user.email||'',accountType:'adult',inviteId:'',joinedAt:nowStamp});
+    setup.set(accountRef,{familyOwnerUid,accountType:'adult',updatedAt:nowStamp});
+    await setup.commit();
+  }else{
+    const memberDocs=await getDocs(collection(db,'families',familyOwnerUid,'members'));
+    if(memberDocs.size>=5)throw new Error('Esta família já possui cinco pessoas.');
+    const familySnapshot=await getDoc(doc(db,'families',familyOwnerUid));
+    guardianName=familySnapshot.data()?.ownerName||ownerName;
+  }
+  const inviteId=crypto.randomUUID().replaceAll('-','').slice(0,20).toUpperCase(),link=`https://medhora-familia.web.app/?invite=${inviteId}`;
+  const emailStatus=deliveryMethod==='email'?'pending':'skipped';
+  await setDoc(doc(db,'invitations',inviteId),{inviteId,ownerUid:user.uid,ownerName,familyOwnerUid,guardianUid:familyOwnerUid,guardianName,invitedEmail:invited,status:'pending',acceptedUid:'',mode:accountType==='minor'?'dependent':'viewer',accountType,selfManage:accountType==='elderly'?elderSelfManage!==false:true,birthDate:accountType==='minor'?birthDate:'',adultAt,deliveryMethod,emailStatus,createdAt:serverTimestamp(),updatedAt:serverTimestamp()});
+  return {inviteId,link,email:invited,accountType,deliveryMethod,emailStatus};
 }
 
 export async function acceptFamilyInvite(user,inviteIdInput) {
-  const inviteId=inviteIdInput.trim().toUpperCase();
-  const inviteRef=doc(db,'invitations',inviteId);const snapshot=await getDoc(inviteRef);
+  const inviteId=String(inviteIdInput||'').trim().toUpperCase(),inviteRef=doc(db,'invitations',inviteId),snapshot=await getDoc(inviteRef);
   if(!snapshot.exists())throw new Error('Convite não encontrado.');
   const invite=snapshot.data();
   if((user.email||'').toLowerCase()!==invite.invitedEmail)throw new Error('Este convite foi criado para outro e-mail.');
   if(invite.status!=='pending'&&invite.acceptedUid!==user.uid)throw new Error('Este convite já foi utilizado.');
   if(invite.status==='accepted'&&invite.acceptedUid===user.uid)return invite.ownerName;
-  if(invite.ownerUid===user.uid)throw new Error('Você já é o dono desta agenda.');
-  const batch=writeBatch(db);const personName=(user.displayName||user.email||'Familiar').slice(0,120);
-  if(invite.mode==='dependent'){
-    batch.set(doc(db,'users',user.uid,'control','access'),{
-      guardianUid:invite.ownerUid,guardianName:invite.ownerName,birthDate:invite.birthDate,
-      adultAt:invite.adultAt,inviteId,createdAt:serverTimestamp(),
-    });
-    batch.set(ownerChild(invite.ownerUid,'dependents',user.uid),{
-      dependentUid:user.uid,displayName:personName,email:user.email||'',birthDate:invite.birthDate,
-      adultAt:invite.adultAt,inviteId,joinedAt:serverTimestamp(),
-    });
+  if(invite.ownerUid===user.uid)throw new Error('Você já faz parte desta família.');
+  const familyOwnerUid=invite.familyOwnerUid||invite.ownerUid;
+  const batch=writeBatch(db),personName=(user.displayName||user.email||'Familiar').slice(0,120),accountType=invite.accountType||(invite.mode==='dependent'?'minor':'adult'),joinedAt=serverTimestamp();
+  batch.set(child(user,'family','account'),{familyOwnerUid,accountType,updatedAt:joinedAt});
+  const selfManage=accountType!=='elderly'||invite.selfManage!==false,guardianUid=invite.guardianUid||familyOwnerUid,guardianName=invite.guardianName||invite.ownerName;
+  batch.set(doc(db,'families',familyOwnerUid,'members',user.uid),{uid:user.uid,displayName:personName,email:user.email||'',accountType,selfManage,guardianUid,inviteId,joinedAt});
+  if(accountType==='minor'){
+    batch.set(doc(db,'users',user.uid,'control','access'),{guardianUid,guardianName,birthDate:invite.birthDate,adultAt:invite.adultAt,inviteId,accountType:'minor',selfManage:false,createdAt:joinedAt});
+    batch.set(ownerChild(guardianUid,'dependents',user.uid),{dependentUid:user.uid,displayName:personName,email:user.email||'',birthDate:invite.birthDate,adultAt:invite.adultAt,inviteId,accountType:'minor',familyOwnerUid,joinedAt});
   }else{
-    batch.set(ownerChild(invite.ownerUid,'members',user.uid),{
-      memberUid:user.uid,email:user.email||'',displayName:personName,inviteId,joinedAt:serverTimestamp(),
-    });
-    batch.set(child(user,'connections',invite.ownerUid),{
-      ownerUid:invite.ownerUid,ownerName:invite.ownerName,inviteId,joinedAt:serverTimestamp(),
-    });
+    batch.set(ownerChild(invite.ownerUid,'members',user.uid),{memberUid:user.uid,email:user.email||'',displayName:personName,inviteId,accountType,familyOwnerUid,joinedAt});
+    batch.set(child(user,'connections',invite.ownerUid),{ownerUid:invite.ownerUid,ownerName:invite.ownerName,inviteId,accountType:'adult',familyOwnerUid,joinedAt});
+    if(accountType==='elderly'&&!selfManage)batch.set(doc(db,'users',user.uid,'control','access'),{guardianUid,guardianName,birthDate:'',adultAt:Timestamp.fromDate(new Date()),inviteId,accountType:'elderly',selfManage:false,createdAt:joinedAt});
   }
   batch.update(inviteRef,{status:'accepted',acceptedUid:user.uid,updatedAt:serverTimestamp()});
   await batch.commit();return invite.ownerName;
+}
+
+export async function rejectFamilyInvite(user,inviteIdInput) {
+  const inviteId=String(inviteIdInput||'').trim().toUpperCase();
+  const inviteRef=doc(db,'invitations',inviteId),snapshot=await getDoc(inviteRef);
+  if(!snapshot.exists())throw new Error('Convite não encontrado.');
+  const invite=snapshot.data();
+  if((user.email||'').toLowerCase()!==invite.invitedEmail)throw new Error('Este convite foi criado para outro e-mail.');
+  if(invite.status!=='pending')throw new Error('Este convite já foi respondido.');
+  await updateDoc(inviteRef,{status:'rejected',acceptedUid:'',updatedAt:serverTimestamp()});
+}
+
+export function subscribeIncomingInvites(user,onState,onError){
+  if(!user.email){onState([]);return()=>{};}
+  const incoming=query(collection(db,'invitations'),where('invitedEmail','==',user.email.toLowerCase()));
+  return onSnapshot(incoming,snapshot=>onState(snapshot.docs.map(item=>item.data()).filter(item=>item.status==='pending')),onError);
+}
+
+export function subscribeFamilyGroup(user,onState,onError){
+  let stopMembers=()=>{};
+  const stopAccount=onSnapshot(child(user,'family','account'),account=>{
+    stopMembers();
+    if(!account.exists()){onState([]);return;}
+    if(account.data().accountType==='minor'){onState([{uid:user.uid,accountType:'minor',isFamilyAdmin:false,selfManage:false}]);return;}
+    const familyOwnerUid=account.data().familyOwnerUid;
+    stopMembers=onSnapshot(collection(db,'families',familyOwnerUid,'members'),snapshot=>onState(snapshot.docs.map(item=>({...item.data(),isFamilyAdmin:item.id===familyOwnerUid}))),onError);
+  },onError);
+  return()=>{stopMembers();stopAccount();};
 }
 
 export async function removeDependent(user,dependentUid) {
@@ -221,4 +282,107 @@ export async function removePairedDevice(user,deviceUid) {
   const pairId=device.data()?.pairId;
   if(pairId)batch.delete(doc(db,'pairings',pairId));
   await batch.commit();
+}
+
+export function subscribeNotificationSettings(user,onState,onError) {
+  return onSnapshot(doc(db,'users',user.uid,'settings','notifications'),snapshot=>{
+    const saved=snapshot.exists()?snapshot.data():{};
+    onState({leadMinutes:5,emailEnabled:true,pushEnabled:true,...saved,recipientEmail:saved.recipientEmail||user.email||''});
+  },onError);
+}
+
+export async function saveNotificationSettings(user,settings) {
+  const recipientEmail=String(settings.recipientEmail||user.email||'').trim().toLowerCase();
+  const leadMinutes=[0,5,10,15,30].includes(Number(settings.leadMinutes))?Number(settings.leadMinutes):5;
+  await setDoc(doc(db,'users',user.uid,'settings','notifications'),{
+    ownerUid:user.uid,recipientEmail,leadMinutes,
+    emailEnabled:settings.emailEnabled!==false,pushEnabled:settings.pushEnabled!==false,
+    updatedAt:serverTimestamp(),
+  },{merge:true});
+}
+
+export async function saveAiConsent(user,accepted,version='2026-09-18') {
+  await setDoc(doc(db,'users',user.uid,'settings','privacy'),{
+    ownerUid:user.uid,aiConsent:accepted===true,consentVersion:String(version).slice(0,20),updatedAt:serverTimestamp(),
+  },{merge:true});
+}
+
+export async function restoreBackup(user,payload) {
+  if(!payload||![2,3].includes(payload.version)||!Array.isArray(payload.medications)||typeof payload.takenDoses!=='object'){
+    throw new Error('Este arquivo não é um backup válido do MedHora Família.');
+  }
+  if(payload.medications.length>200||Object.keys(payload.takenDoses||{}).length>250){
+    throw new Error('O backup excede o limite seguro de 200 medicamentos e 250 registros.');
+  }
+  const writes=[];
+  payload.medications.forEach(raw=>{
+    const id=String(raw.id||crypto.randomUUID()).slice(0,100);
+    const data={...raw,date:String(raw.date||'').slice(0,10),start:String(raw.start||'00:00').slice(0,5)};
+    const type=data.asNeeded?'asNeeded':data.scheduleType||'interval';
+    if(!String(data.name||'').trim()||!/^(\d{4})-(\d{2})-(\d{2})$/.test(data.date)||!['interval','times','asNeeded'].includes(type))throw new Error('O backup contém um medicamento incompleto ou inválido.');
+    const days=Number(data.days)||0,times=Array.isArray(data.times)?data.times:[];
+    if(days<0||days>365||String(data.dose||'').length>500||
+      (type==='interval'&&(![6,8,12,24].includes(Number(data.freq))||!/^([01]\d|2[0-3]):[0-5]\d$/.test(data.start)))||
+      (type==='times'&&(!times.length||times.length>8||times.some(time=>!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)))))throw new Error('O backup contém horários ou duração inválidos.');
+    const fields=medicationFields(data);
+    writes.push({ref:ownerChild(user.uid,'medications',id),data:{id,ownerUid:user.uid,...fields,createdAt:serverTimestamp()}});
+  });
+  Object.entries(payload.takenDoses||{}).filter(([,taken])=>taken===true).forEach(([doseKey])=>{
+    const safeKey=String(doseKey).slice(0,180);
+    const dateMatch=safeKey.match(/^(\d{4}-\d{2}-\d{2})-.*-(\d{1,4})$/);
+    const minutes=dateMatch?Math.max(0,Math.min(1439,Number(dateMatch[2])||0)):0;
+    const scheduledAt=dateMatch?new Date(`${dateMatch[1]}T${String(Math.floor(minutes/60)).padStart(2,'0')}:${String(minutes%60).padStart(2,'0')}:00`):new Date();
+    const detail=payload.doseRecords?.[doseKey]||{};
+    const savedScheduled=new Date(detail.scheduledAt||scheduledAt),savedTaken=new Date(detail.takenAt||savedScheduled);
+    writes.push({ref:ownerChild(user.uid,'doses',safeKey),data:{doseKey:safeKey,ownerUid:user.uid,taken:true,medicationId:String(detail.medicationId||'').slice(0,100),medicationName:String(detail.medicationName||'Medicamento importado').slice(0,120),scheduledAt:Timestamp.fromDate(Number.isFinite(+savedScheduled)?savedScheduled:scheduledAt),takenAt:Timestamp.fromDate(Number.isFinite(+savedTaken)?savedTaken:scheduledAt),outOfSchedule:detail.outOfSchedule===true,scheduleAdjusted:detail.scheduleAdjusted===true,takenByUid:user.uid,updatedAt:serverTimestamp()}});
+  });
+  const [medications,doses]=await Promise.all([
+    getDocs(collection(db,'users',user.uid,'medications')),
+    getDocs(collection(db,'users',user.uid,'doses')),
+  ]);
+  const existingDocs=[...medications.docs,...doses.docs];
+  const existingByPath=new Map(existingDocs.map(item=>[item.ref.path,item]));
+  writes.forEach(item=>{
+    const current=existingByPath.get(item.ref.path);
+    if(current&&item.ref.path.includes('/medications/'))item.data.createdAt=current.data().createdAt;
+  });
+  const importedPaths=new Set(writes.map(item=>item.ref.path));
+  const obsolete=existingDocs.filter(item=>!importedPaths.has(item.ref.path));
+  const operationCount=writes.length+obsolete.length;
+
+  // A restauração comum cabe em um único commit: ou tudo muda, ou nada muda.
+  if(operationCount<=450){
+    const batch=writeBatch(db);
+    writes.forEach(item=>batch.set(item.ref,item.data));
+    obsolete.forEach(item=>batch.delete(item.ref));
+    await batch.commit();
+    return;
+  }
+
+  // Em backups excepcionalmente grandes, grava primeiro. Assim uma falha de rede
+  // nunca apaga a agenda atual antes de existir uma cópia restaurada utilizável.
+  for(let index=0;index<writes.length;index+=400){
+    const batch=writeBatch(db);
+    writes.slice(index,index+400).forEach(item=>batch.set(item.ref,item.data));
+    await batch.commit();
+  }
+  for(let index=0;index<obsolete.length;index+=400){
+    const batch=writeBatch(db);
+    obsolete.slice(index,index+400).forEach(item=>batch.delete(item.ref));
+    await batch.commit();
+  }
+}
+
+export async function deleteAccountData(user) {
+  const groups=['medications','doses','members','connections','dependents','devices','pushTokens','settings','control','deliveries'];
+  const snapshots=await Promise.all(groups.map(group=>getDocs(collection(db,'users',user.uid,group))));
+  const invitations=await getDocs(query(collection(db,'invitations'),where('ownerUid','==',user.uid)));
+  const refs=[];
+  snapshots.forEach(snapshot=>snapshot.docs.forEach(item=>refs.push(item.ref)));
+  invitations.docs.forEach(item=>refs.push(item.ref));
+  snapshots[2].docs.forEach(item=>refs.push(ownerChild(item.id,'connections',user.uid)));
+  snapshots[3].docs.forEach(item=>refs.push(ownerChild(item.id,'members',user.uid)));
+  snapshots[4].docs.forEach(item=>refs.push(ownerChild(item.id,'control','access')));
+  for(let index=0;index<refs.length;index+=400){const batch=writeBatch(db);refs.slice(index,index+400).forEach(ref=>batch.delete(ref));await batch.commit();}
+  await deleteDoc(userRef(user));
 }

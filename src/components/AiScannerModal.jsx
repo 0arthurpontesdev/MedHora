@@ -1,13 +1,16 @@
 import React, { useState, useRef } from 'react';
-import { Sparkles, Camera, Upload, AlertCircle, Check, Loader2, X, RefreshCw, Eye } from 'lucide-react';
+import { Sparkles, Camera, Upload, AlertCircle, Check, X, RefreshCw, FileText } from 'lucide-react';
 import { parsePrescriptionWithMaria } from '../geminiScanner.js';
 import { localDateKey } from '../schedule.js';
+import { formatFieldList, getMedicationReview } from '../prescriptionReview.js';
 
 export function AiScannerModal({ onClose, onAddMedications }) {
   const [imagePreview, setImagePreview] = useState(null);
   const [mimeType, setMimeType] = useState('image/jpeg');
+  const [fileName,setFileName]=useState('');
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState('');
+  const [errorKind,setErrorKind]=useState('');
   const [parsedData, setParsedData] = useState(null);
   const [selectedMeds, setSelectedMeds] = useState([]);
   const fileInputRef = useRef(null);
@@ -15,16 +18,20 @@ export function AiScannerModal({ onClose, onAddMedications }) {
 
   const handleFile = (file) => {
     if (!file) return;
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
-      setError('Por favor, selecione um arquivo de imagem válido (JPG, PNG ou WebP).');
+    if (!['image/jpeg', 'image/png', 'image/webp','application/pdf'].includes(file.type)) {
+      setErrorKind('format');
+      setError('Formato não aceito. Envie uma imagem JPG, PNG ou WebP, ou um arquivo PDF.');
       return;
     }
-    if (file.size > 5 * 1024 * 1024) {
-      setError('A imagem é muito grande. Escolha uma foto de até 5 MB.');
+    if (file.size > 10 * 1024 * 1024) {
+      setErrorKind('size');
+      setError('O arquivo ultrapassa 10 MB. Escolha uma imagem ou PDF menor.');
       return;
     }
     setError('');
+    setErrorKind('');
     setMimeType(file.type);
+    setFileName(file.name);
     const reader = new FileReader();
     reader.onload = (e) => {
       setImagePreview(e.target.result);
@@ -36,20 +43,27 @@ export function AiScannerModal({ onClose, onAddMedications }) {
   const processImage = async (base64, type) => {
     setAnalyzing(true);
     setError('');
+    setErrorKind('');
     setParsedData(null);
+    setSelectedMeds([]);
     try {
       const data = await parsePrescriptionWithMaria(base64, type);
-      if (!data.medications || data.medications.length === 0) {
-        setError('Não foi possível identificar medicamentos legíveis nesta imagem. Tente enviar uma foto mais nítida com melhor iluminação.');
+      if(data.documentType==='notMedical'){
+        setErrorKind('not-prescription');
+        setError(`Este arquivo não parece ser um receituário, uma bula ou uma embalagem de medicamento${data.documentReason?`: ${data.documentReason}`:'.'}`);
+      } else if (!data.medications || data.medications.length === 0) {
+        setErrorKind('unreadable');
+        setError('Não foi possível identificar medicamentos legíveis neste arquivo. Se for uma foto, tente outra mais nítida e com melhor iluminação.');
       } else {
         setParsedData(data);
         setSelectedMeds(data.medications
           .map((med, idx) => ({ med, idx }))
-          .filter(({ med }) => !med.needsReview)
+          .filter(({ med }) => getMedicationReview(med).canRegister && !med.needsReview && med.confidence !== 'low')
           .map(({ idx }) => idx));
       }
     } catch (err) {
       console.error(err);
+      setErrorKind('processing');
       setError(err.message || 'Erro ao processar receita médica com Inteligência Artificial.');
     } finally {
       setAnalyzing(false);
@@ -67,19 +81,21 @@ export function AiScannerModal({ onClose, onAddMedications }) {
     const nextMeds = [...parsedData.medications];
     nextMeds[idx] = { ...nextMeds[idx], [field]: val };
     setParsedData({ ...parsedData, medications: nextMeds });
+    setError('');
   };
 
   const handleConfirm = () => {
     if (!parsedData || selectedMeds.length === 0) return;
 
-    const invalid = selectedMeds.find((idx) => {
-      const m=parsedData.medications[idx];
-      return !m.name?.trim() || !m.dose?.trim() || !m.days || m.scheduleType === 'unknown' ||
-        (m.scheduleType === 'interval' && (![6,8,12,24].includes(Number(m.freq)) || !m.start)) ||
-        (m.scheduleType === 'times' && (!Array.isArray(m.times) || m.times.length === 0));
-    });
-    if (invalid !== undefined) {
-      setError('Revise os campos obrigatórios do medicamento selecionado. Nome, dose, frequência/horário e duração precisam estar confirmados.');
+    const invalid = selectedMeds
+      .map((idx) => ({idx, review: getMedicationReview(parsedData.medications[idx])}))
+      .filter(({review}) => !review.canRegister);
+    if (invalid.length) {
+      const details = invalid.map(({idx, review}) => {
+        const med = parsedData.medications[idx];
+        return `${med.name?.trim() || `Medicamento ${idx + 1}`}: ${formatFieldList(review.required)}`;
+      });
+      setError(`Complete os campos obrigatórios: ${details.join(' • ')}.`);
       return;
     }
 
@@ -87,12 +103,12 @@ export function AiScannerModal({ onClose, onAddMedications }) {
       const m = parsedData.medications[idx];
       return {
         name: m.name.trim(),
-        dose: m.dose.trim(),
+        dose: m.dose?.trim() || '',
         scheduleType: m.scheduleType || 'interval',
         freq: m.scheduleType === 'asNeeded' ? 'prn' : String(m.freq || ''),
         times: Array.isArray(m.times) ? m.times : [],
         start: m.start || '',
-        days: String(m.days || ''),
+        days: String(Number(m.days) || 0),
         date: localDateKey(),
         notes: [m.notes, m.confidenceNotes ? `[IA: ${m.confidenceNotes}]` : '']
           .filter(Boolean)
@@ -127,8 +143,8 @@ export function AiScannerModal({ onClose, onAddMedications }) {
               <div className="aiIconCircle">
                 <Sparkles size={36} />
               </div>
-              <h3>Fotografe ou envie a imagem da receita</h3>
-              <p>A M.A.R.I.A. procurará nome, dose, frequência e duração sem completar dados ausentes.</p>
+              <h3>Envie seu receituário</h3>
+              <p>Use uma foto nítida ou um PDF. A M.A.R.I.A. identifica nome, dose, frequência e duração sem completar dados ausentes.</p>
 
               <div className="aiUploadButtons">
                 <button
@@ -143,14 +159,14 @@ export function AiScannerModal({ onClose, onAddMedications }) {
                   className="softBtn"
                   onClick={() => fileInputRef.current?.click()}
                 >
-                  <Upload size={18} /> Selecionar Arquivo
+                  <Upload size={18} /> Selecionar imagem ou PDF
                 </button>
               </div>
 
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/*"
+                accept="image/jpeg,image/png,image/webp,application/pdf,.pdf"
                 className="hiddenFileInput"
                 onChange={(e) => handleFile(e.target.files?.[0])}
               />
@@ -170,7 +186,7 @@ export function AiScannerModal({ onClose, onAddMedications }) {
           <div className="aiPreviewLayout">
             <div className="aiImageSidebar">
               <div className="aiThumbnailBox">
-                <img src={imagePreview} alt="Receita médica para análise" />
+                {mimeType==='application/pdf'?<div className="aiPdfPreview"><FileText size={44}/><strong>{fileName||'Receituário em PDF'}</strong><span>Documento PDF</span></div>:<img src={imagePreview} alt="Receita médica para análise" />}
               </div>
               <button
                 type="button"
@@ -180,18 +196,21 @@ export function AiScannerModal({ onClose, onAddMedications }) {
                   setImagePreview(null);
                   setParsedData(null);
                   setError('');
+                  setErrorKind('');
+                  setFileName('');
                 }}
               >
-                <RefreshCw size={14} /> Trocar imagem
+                <RefreshCw size={14} /> Trocar arquivo
               </button>
             </div>
 
             <div className="aiResultsArea">
               {analyzing && (
                 <div className="aiLoadingState">
-                  <Loader2 size={40} className="spinner" />
+                  <div className="mariaOrbitLoader" aria-hidden="true"><span className="mariaCore"><Sparkles size={38}/></span><span className="mariaOrbit orbitOne"><Sparkles size={15}/></span><span className="mariaOrbit orbitTwo"><Sparkles size={11}/></span><span className="mariaOrbit orbitThree"><Sparkles size={9}/></span></div>
                   <h4>A M.A.R.I.A. está lendo o receituário...</h4>
-                  <p>Transcrevendo os dados visíveis para você conferir.</p>
+                  <p>Conferindo o documento e transcrevendo somente o que está visível.</p>
+                  <div className="aiLoadingSteps"><span>Identificando o documento</span><span>Localizando medicamentos</span><span>Organizando a agenda</span></div>
                 </div>
               )}
 
@@ -199,9 +218,9 @@ export function AiScannerModal({ onClose, onAddMedications }) {
                 <div className="aiErrorNotice">
                   <AlertCircle size={20} />
                   <div style={{ flex: 1 }}>
-                    <strong>Atenção</strong>
+                    <strong>{errorKind==='not-prescription'?'Arquivo não reconhecido como receita':'Não foi possível concluir'}</strong>
                     <p style={{ margin: '4px 0 10px' }}>{error}</p>
-                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    {!parsedData && <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                       <button
                         type="button"
                         className="smallBtn"
@@ -216,12 +235,14 @@ export function AiScannerModal({ onClose, onAddMedications }) {
                         onClick={() => {
                           setImagePreview(null);
                           setError('');
+                          setErrorKind('');
+                          setFileName('');
                         }}
                         style={{ background: 'transparent', border: '1px solid #e2e8f0', color: '#475569' }}
                       >
-                        Escolher outra imagem
+                        Escolher outro arquivo
                       </button>
-                    </div>
+                    </div>}
                   </div>
                 </div>
               )}
@@ -237,6 +258,8 @@ export function AiScannerModal({ onClose, onAddMedications }) {
 
                   {parsedData.medications.map((med, idx) => {
                     const isSelected = selectedMeds.includes(idx);
+                    const review = getMedicationReview(med);
+                    const hasReadingDoubt = Boolean(med.confidenceNotes);
                     return (
                       <div
                         key={idx}
@@ -251,12 +274,33 @@ export function AiScannerModal({ onClose, onAddMedications }) {
                             />
                             <strong>{med.name}</strong>
                           </label>
-                          <span className={`tag ${med.needsReview ? 'amber' : 'green'}`}>
-                            {med.needsReview ? 'Precisa de revisão' : `${med.days} dias`}
+                          <span className={`tag ${review.required.length || hasReadingDoubt ? 'amber' : 'green'}`}>
+                            {review.required.length
+                              ? `Falta: ${formatFieldList(review.required)}`
+                              : hasReadingDoubt
+                              ? 'Confira a leitura'
+                              : med.days
+                              ? `${med.days} dias`
+                              : 'Pode cadastrar'}
+                          </span>
+                          <span className={`confidenceBadge confidence-${med.confidence||'low'}`}>
+                            Confiança {med.confidence==='high'?'alta':med.confidence==='medium'?'média':'baixa'}
                           </span>
                         </div>
 
-                        <div className="aiMedForm">
+                          <div className="aiMedForm">
+                          {review.required.length > 0 && (
+                            <div className="aiFieldNotice requiredNotice">
+                              <strong>Obrigatório para montar a agenda:</strong>
+                              <span>{formatFieldList(review.required)}</span>
+                            </div>
+                          )}
+                          {review.optional.length > 0 && (
+                            <div className="aiFieldNotice optionalNotice">
+                              <strong>Não informado (opcional):</strong>
+                              <span>{formatFieldList(review.optional)}. Você pode cadastrar e completar depois.</span>
+                            </div>
+                          )}
                           <div className="aiField">
                             <label>Nome do Remédio</label>
                             <input
@@ -267,7 +311,7 @@ export function AiScannerModal({ onClose, onAddMedications }) {
                           </div>
 
                           <div className="aiField">
-                            <label>Dosagem / Posologia</label>
+                            <label>Dosagem / Posologia <span className="optional">opcional</span></label>
                             <input
                               type="text"
                               value={med.dose}
@@ -306,7 +350,7 @@ export function AiScannerModal({ onClose, onAddMedications }) {
                             )}
 
                             <div className="aiField">
-                              <label>Duração (dias)</label>
+                              <label>Duração (dias) <span className="optional">opcional</span></label>
                               <input
                                 type="number"
                                 min="1"
@@ -357,11 +401,7 @@ export function AiScannerModal({ onClose, onAddMedications }) {
           </div>
         )}
 
-        <div className="modalActions">
-          <button type="button" className="cancel" onClick={onClose}>
-            Cancelar
-          </button>
-          {parsedData && !analyzing && (
+        {parsedData && !analyzing && <div className="modalActions aiConfirmActions">
             <button
               type="button"
               className="primary"
@@ -371,8 +411,7 @@ export function AiScannerModal({ onClose, onAddMedications }) {
               <Check size={18} />
               Conferi e quero cadastrar {selectedMeds.length}
             </button>
-          )}
-        </div>
+        </div>}
       </div>
     </div>
   );

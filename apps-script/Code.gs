@@ -2,7 +2,7 @@ const PROJECT_ID = 'minha-medicacao-arthur-2026';
 const FIRESTORE_ROOT = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents`;
 const TIME_ZONE = 'America/Fortaleza';
 const SITE_URL = 'https://medhora-familia.web.app';
-const REMINDER_LEAD_MINUTES = 5;
+const DEFAULT_REMINDER_LEAD_MINUTES = 5;
 const REMINDER_CATCH_UP_MINUTES = 2;
 const DAILY_REMINDERS_PER_USER = 24;
 const DAILY_REMINDERS_TOTAL = 72;
@@ -37,17 +37,21 @@ function runReminders() {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(20000)) return;
   try {
+    sendPendingInvitations_();
     const now = Date.now();
-    const from = now + (REMINDER_LEAD_MINUTES - REMINDER_CATCH_UP_MINUTES) * 60 * 1000;
-    const until = now + REMINDER_LEAD_MINUTES * 60 * 1000 + 60 * 1000;
     const channels = {};
     listMedications_().forEach(entry => {
       const med = entry.medication;
       if ((med.status || 'active') !== 'active' || med.asNeeded === true || med.scheduleType === 'asNeeded') return;
+      const settings=settingsFor_(entry.uid);
+      const lead=[0,5,10,15,30].indexOf(Number(settings.leadMinutes))>=0?Number(settings.leadMinutes):DEFAULT_REMINDER_LEAD_MINUTES;
+      const from = now + (lead - REMINDER_CATCH_UP_MINUTES) * 60 * 1000;
+      const until = now + lead * 60 * 1000 + 60 * 1000;
       dueTimes_(med, from, until).forEach(at => {
         const userChannels = channels[entry.uid] || (channels[entry.uid] = {
-          email: recipientFor_(entry.uid),
-          pushTokens: pushTokensFor_(entry.uid),
+          email: settings.emailEnabled===false?'':settings.recipientEmail,
+          pushTokens: settings.pushEnabled===false?[]:pushTokensFor_(entry.uid),
+          leadMinutes:lead,
         });
         if (!isValidEmail_(userChannels.email) && !userChannels.pushTokens.length) return;
         sendReminder_(entry.uid, med, at, userChannels);
@@ -56,6 +60,49 @@ function runReminders() {
   } finally {
     lock.releaseLock();
   }
+}
+
+function sendPendingInvitations_() {
+  if (MailApp.getRemainingDailyQuota() <= 0) return;
+  const rows=firestoreFetch_(`${FIRESTORE_ROOT}:runQuery`,{
+    method:'post',
+    payload:JSON.stringify({structuredQuery:{
+      from:[{collectionId:'invitations'}],
+      where:{fieldFilter:{field:{fieldPath:'emailStatus'},op:'EQUAL',value:{stringValue:'pending'}}},
+      limit:20,
+    }}),
+  });
+  rows.filter(row=>row.document).forEach(row=>{
+    const invite=decodeFields_(row.document.fields);
+    if(invite.status!=='pending'||invite.deliveryMethod!=='email'||!isValidEmail_(invite.invitedEmail))return;
+    const documentUrl=`${FIRESTORE_ROOT}/invitations/${encodeURIComponent(invite.inviteId)}`;
+    if(!patchInviteEmailStatus_(documentUrl,'sending'))return;
+    try{
+      const safeOwner=htmlEscape_(invite.ownerName||'Um familiar');
+      const safeRole=htmlEscape_(invite.accountType==='minor'?'menor':invite.accountType==='elderly'?'idoso':'adulto');
+      const link=`${SITE_URL}/?invite=${encodeURIComponent(invite.inviteId)}`;
+      MailApp.sendEmail({
+        to:invite.invitedEmail,
+        subject:`${invite.ownerName||'Um familiar'} convidou você para o MedHora Família`,
+        name:'MedHora Família',
+        body:`${invite.ownerName||'Um familiar'} convidou você para entrar na família do MedHora como ${safeRole}.\n\nAceitar convite: ${link}\n\nCódigo: ${invite.inviteId}\n\nAceite somente se você conhece essa pessoa.`,
+        htmlBody:`<div style="font-family:Arial,sans-serif;line-height:1.5;color:#17352d;max-width:520px"><p style="color:#517068">CONVITE PARA A FAMÍLIA</p><h2 style="color:#17785d">${safeOwner} convidou você</h2><p>Entre no MedHora como <strong>${safeRole}</strong>.</p><p><a href="${link}" style="display:inline-block;background:#17785d;color:#fff;padding:12px 18px;border-radius:8px;text-decoration:none;font-weight:bold">Ver e aceitar convite</a></p><p style="font-size:12px;color:#6c7d78">Código alternativo: ${htmlEscape_(invite.inviteId)}<br>Aceite somente se você conhece essa pessoa.</p></div>`,
+      });
+      patchInviteEmailStatus_(documentUrl,'sent',true);
+    }catch(error){patchInviteEmailStatus_(documentUrl,'failed');}
+  });
+}
+
+function patchInviteEmailStatus_(url,status,withSentAt) {
+  const fields={emailStatus:{stringValue:status}};
+  const masks=['emailStatus'];
+  if(withSentAt){fields.emailSentAt={timestampValue:new Date().toISOString()};masks.push('emailSentAt');}
+  const query=masks.map(field=>`updateMask.fieldPaths=${encodeURIComponent(field)}`).join('&');
+  const response=UrlFetchApp.fetch(`${url}?${query}`,{
+    method:'patch',headers:authHeaders_(),contentType:'application/json',muteHttpExceptions:true,
+    payload:JSON.stringify({fields}),
+  });
+  return response.getResponseCode()===200;
 }
 
 function listMedications_() {
@@ -73,25 +120,35 @@ function listMedications_() {
 }
 
 function recipientFor_(uid) {
+  return settingsFor_(uid).recipientEmail;
+}
+
+function settingsFor_(uid) {
+  let loginEmail='';
   const profile = UrlFetchApp.fetch(`${FIRESTORE_ROOT}/users/${encodeURIComponent(uid)}`, {
     headers:authHeaders_(), muteHttpExceptions:true,
   });
   if (profile.getResponseCode() === 200) {
-    const loginEmail = decodeFields_(JSON.parse(profile.getContentText()).fields).email || '';
-    if (isValidEmail_(loginEmail)) return loginEmail;
+    loginEmail = decodeFields_(JSON.parse(profile.getContentText()).fields).email || '';
   }
   const legacy = UrlFetchApp.fetch(`${FIRESTORE_ROOT}/users/${encodeURIComponent(uid)}/settings/notifications`, {
     headers:authHeaders_(), muteHttpExceptions:true,
   });
-  if (legacy.getResponseCode() !== 200) return '';
-  return decodeFields_(JSON.parse(legacy.getContentText()).fields).recipientEmail || '';
+  const saved=legacy.getResponseCode()===200?decodeFields_(JSON.parse(legacy.getContentText()).fields):{};
+  return {
+    recipientEmail:isValidEmail_(saved.recipientEmail)?saved.recipientEmail:loginEmail,
+    leadMinutes:Number(saved.leadMinutes||DEFAULT_REMINDER_LEAD_MINUTES),
+    emailEnabled:saved.emailEnabled!==false,
+    pushEnabled:saved.pushEnabled!==false,
+  };
 }
 
 function dueTimes_(med, from, until) {
   if (med.scheduleType === 'times' && Array.isArray(med.times)) {
     const result = [];
     const days = Number(med.days);
-    for (let day = 0; day < days; day++) {
+    const totalDays=days>0?days:Math.ceil((until-new Date(`${med.date}T00:00:00-03:00`).getTime())/86400000)+1;
+    for (let day = 0; day < totalDays; day++) {
       med.times.forEach(time => {
         if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) return;
         const base = new Date(`${med.date}T${time}:00-03:00`).getTime() + day * 86400000;
@@ -102,7 +159,8 @@ function dueTimes_(med, from, until) {
   }
   const start = Date.parse(med.startsAt);
   const step = Number(med.freq) * 3600000;
-  const end = start + Number(med.days) * 86400000;
+  const days=Number(med.days);
+  const end = days>0?start + days * 86400000:Number.POSITIVE_INFINITY;
   if (!Number.isFinite(start) || !Number.isFinite(step) || step <= 0) return [];
   const first = start + Math.max(0, Math.ceil((from - start) / step)) * step;
   const result = [];
@@ -133,7 +191,7 @@ function sendReminder_(uid, med, at, channels) {
       try {
         MailApp.sendEmail({
           to: channels.email,
-          subject: `Às ${clock}: ${med.name}`,
+          subject: `${channels.leadMinutes?`Em ${channels.leadMinutes} min`: 'Agora'}: ${med.name}`,
           name: 'MedHora Família',
           body: `Seu próximo horário é ${time}.\n\nMedicamento: ${med.name}\nDose: ${med.dose}${med.notes ? `\nObservação: ${med.notes}` : ''}\n\nAbra sua agenda: ${SITE_URL}\n\nSiga sempre a prescrição do seu profissional de saúde.`,
           htmlBody: `<div style="font-family:Arial,sans-serif;line-height:1.5;color:#17352d;max-width:520px"><p style="color:#517068;margin-bottom:6px">LEMBRETE DE MEDICAÇÃO</p><h2 style="margin:0 0 16px;color:#17785d">Próximo horário: ${clock}</h2><div style="background:#f1f7f5;border-radius:12px;padding:16px;margin-bottom:18px"><strong style="font-size:18px">${safeName}</strong><p style="margin:6px 0 0">${safeDose}</p>${safeNotes ? `<p style="margin:6px 0 0;color:#517068">${safeNotes}</p>` : ''}</div><p><a href="${SITE_URL}" style="display:inline-block;background:#17785d;color:#fff;padding:12px 18px;border-radius:8px;text-decoration:none;font-weight:bold">Abrir agenda e marcar como tomado</a></p><p style="font-size:12px;color:#6c7d78;margin-top:22px">Siga sempre a prescrição do seu profissional de saúde.</p></div>`,

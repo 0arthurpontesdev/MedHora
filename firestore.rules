@@ -21,7 +21,12 @@ service cloud.firestore {
     }
     function isManagedMinor(userId) {
       return exists(/databases/$(database)/documents/users/$(userId)/control/access) &&
-        get(/databases/$(database)/documents/users/$(userId)/control/access).data.adultAt > request.time;
+        ((('accountType' in get(/databases/$(database)/documents/users/$(userId)/control/access).data) &&
+          get(/databases/$(database)/documents/users/$(userId)/control/access).data.accountType == 'elderly' &&
+          get(/databases/$(database)/documents/users/$(userId)/control/access).data.selfManage == false) ||
+         ((!('accountType' in get(/databases/$(database)/documents/users/$(userId)/control/access).data) ||
+           get(/databases/$(database)/documents/users/$(userId)/control/access).data.accountType == 'minor') &&
+          get(/databases/$(database)/documents/users/$(userId)/control/access).data.adultAt > request.time));
     }
     function isGuardian(userId) {
       return isAuthenticated() && isManagedMinor(userId) &&
@@ -30,8 +35,21 @@ service cloud.firestore {
     function isPairedDevice(userId) {
       return isAuthenticated() && exists(/databases/$(database)/documents/users/$(userId)/devices/$(request.auth.uid));
     }
+    function hasFamilyAccount(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId)/family/account);
+    }
+    function familyIdFor(userId) {
+      return get(/databases/$(database)/documents/users/$(userId)/family/account).data.familyOwnerUid;
+    }
+    function canViewAsAdultFamily(userId) {
+      return isAuthenticated() && hasFamilyAccount(userId) && hasFamilyAccount(request.auth.uid) &&
+        familyIdFor(userId) == familyIdFor(request.auth.uid) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)/family/account).data.accountType in ['adult','elderly'] &&
+        exists(/databases/$(database)/documents/families/$(familyIdFor(userId))/members/$(request.auth.uid)) &&
+        exists(/databases/$(database)/documents/families/$(familyIdFor(userId))/members/$(userId));
+    }
     function canManageAgenda(userId) { return (isOwner(userId) && !isManagedMinor(userId)) || isGuardian(userId); }
-    function canViewAgenda(userId) { return isOwner(userId) || isMember(userId) || isGuardian(userId) || isPairedDevice(userId); }
+    function canViewAgenda(userId) { return isOwner(userId) || isMember(userId) || isGuardian(userId) || isPairedDevice(userId) || canViewAsAdultFamily(userId); }
     function hasRequiredFields(data, fields) { return data.keys().hasAll(fields); }
     function hasOnlyAllowedFields(data, fields) { return data.keys().hasOnly(fields); }
     function isRecent(time) {
@@ -65,10 +83,10 @@ service cloud.firestore {
     }
     function isValidMedication(data,userId,medId) {
       return hasRequiredFields(data,['id','ownerUid','name','dose','notes','start','date','freq','asNeeded','scheduleType','times','status','days','startsAt','createdAt','updatedAt']) &&
-        hasOnlyAllowedFields(data,['id','ownerUid','name','dose','notes','start','date','freq','asNeeded','scheduleType','times','status','days','startsAt','createdAt','updatedAt']) &&
+        hasOnlyAllowedFields(data,['id','ownerUid','name','dose','notes','start','date','freq','asNeeded','scheduleType','times','status','days','startsAt','scheduleAnchorAt','createdAt','updatedAt']) &&
         data.id == medId && data.id.size() <= 100 && data.ownerUid == userId &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
-        data.dose is string && data.dose.size() >= 1 && data.dose.size() <= 500 &&
+        data.dose is string && data.dose.size() <= 500 &&
         data.notes is string && data.notes.size() <= 2000 &&
         isValidTime(data.start) && data.date is string && data.date.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
         data.freq is int && data.asNeeded is bool && data.scheduleType in ['interval','times','asNeeded'] &&
@@ -76,42 +94,69 @@ service cloud.firestore {
         ((data.scheduleType == 'asNeeded' && data.asNeeded == true && data.freq == 0 && data.times.size() == 0) ||
          (data.scheduleType == 'interval' && data.asNeeded == false && data.freq in [6,8,12,24] && data.times.size() == 0) ||
          (data.scheduleType == 'times' && data.asNeeded == false && data.freq == 0 && data.times.size() >= 1)) &&
-        data.days is int && data.days >= 1 && data.days <= 365 &&
-        data.startsAt is timestamp && data.createdAt is timestamp && data.updatedAt is timestamp;
+        data.days is int && data.days >= 0 && data.days <= 365 &&
+        data.startsAt is timestamp && (!('scheduleAnchorAt' in data) || data.scheduleAnchorAt is timestamp) && data.createdAt is timestamp && data.updatedAt is timestamp;
     }
     function isValidDose(data,userId,doseKey) {
       return hasRequiredFields(data,['doseKey','ownerUid','taken','updatedAt']) &&
-        hasOnlyAllowedFields(data,['doseKey','ownerUid','taken','updatedAt']) &&
+        hasOnlyAllowedFields(data,['doseKey','ownerUid','taken','medicationId','medicationName','scheduledAt','takenAt','outOfSchedule','scheduleAdjusted','takenByUid','updatedAt']) &&
         data.doseKey == doseKey && data.doseKey.size() >= 1 && data.doseKey.size() <= 180 &&
-        data.ownerUid == userId && data.taken == true && data.updatedAt is timestamp;
+        data.ownerUid == userId && data.taken == true && data.updatedAt is timestamp &&
+        (
+          data.keys().hasOnly(['doseKey','ownerUid','taken','updatedAt']) ||
+          (
+            hasRequiredFields(data,['medicationId','medicationName','scheduledAt','takenAt','outOfSchedule','scheduleAdjusted','takenByUid']) &&
+            data.medicationId is string && data.medicationId.size() <= 100 &&
+            data.medicationName is string && data.medicationName.size() >= 1 && data.medicationName.size() <= 120 &&
+            data.scheduledAt is timestamp && data.takenAt is timestamp &&
+            data.outOfSchedule is bool && data.scheduleAdjusted is bool && data.takenByUid == request.auth.uid
+          )
+        );
     }
     function isValidSettings(data,userId) {
-      return hasRequiredFields(data,['ownerUid','recipientEmail','updatedAt']) &&
-        hasOnlyAllowedFields(data,['ownerUid','recipientEmail','updatedAt']) &&
-        data.ownerUid == userId && isValidEmail(data.recipientEmail) && data.updatedAt is timestamp;
+      return hasRequiredFields(data,['ownerUid','recipientEmail','leadMinutes','emailEnabled','pushEnabled','updatedAt']) &&
+        hasOnlyAllowedFields(data,['ownerUid','recipientEmail','leadMinutes','emailEnabled','pushEnabled','updatedAt']) &&
+        data.ownerUid == userId && isValidEmail(data.recipientEmail) &&
+        data.leadMinutes in [0,5,10,15,30] && data.emailEnabled is bool && data.pushEnabled is bool &&
+        data.updatedAt is timestamp;
+    }
+    function isValidPrivacySettings(data,userId) {
+      return hasRequiredFields(data,['ownerUid','aiConsent','consentVersion','updatedAt']) &&
+        hasOnlyAllowedFields(data,['ownerUid','aiConsent','consentVersion','updatedAt']) &&
+        data.ownerUid == userId && data.aiConsent is bool &&
+        data.consentVersion is string && data.consentVersion.size() >= 1 && data.consentVersion.size() <= 20 &&
+        data.updatedAt is timestamp;
     }
     function isValidInvitation(data,inviteId) {
       return hasRequiredFields(data,['inviteId','ownerUid','ownerName','invitedEmail','status','acceptedUid','mode','birthDate','adultAt','createdAt','updatedAt']) &&
-        hasOnlyAllowedFields(data,['inviteId','ownerUid','ownerName','invitedEmail','status','acceptedUid','mode','birthDate','adultAt','createdAt','updatedAt']) &&
+        hasOnlyAllowedFields(data,['inviteId','ownerUid','ownerName','familyOwnerUid','guardianUid','guardianName','invitedEmail','status','acceptedUid','mode','accountType','selfManage','birthDate','adultAt','deliveryMethod','emailStatus','emailSentAt','createdAt','updatedAt']) &&
         data.inviteId == inviteId && inviteId.size() == 20 &&
         data.ownerUid is string && data.ownerUid.size() >= 20 && data.ownerUid.size() <= 128 &&
         data.ownerName is string && data.ownerName.size() >= 1 && data.ownerName.size() <= 120 &&
-        isValidEmail(data.invitedEmail) && data.status in ['pending','accepted'] &&
-        data.mode in ['viewer','dependent'] && data.birthDate is string && data.birthDate.size() <= 10 && data.adultAt is timestamp &&
+        isValidEmail(data.invitedEmail) && data.status in ['pending','accepted','rejected'] &&
+        data.mode in ['viewer','dependent'] && (!('accountType' in data) || data.accountType in ['adult','elderly','minor']) &&
+        (!('familyOwnerUid' in data) || (data.familyOwnerUid is string && data.familyOwnerUid.size() >= 20 && data.familyOwnerUid.size() <= 128)) &&
+        (!('guardianUid' in data) || (data.guardianUid is string && data.guardianUid.size() >= 20 && data.guardianUid.size() <= 128)) &&
+        (!('guardianName' in data) || (data.guardianName is string && data.guardianName.size() >= 1 && data.guardianName.size() <= 120)) &&
+        (!('selfManage' in data) || data.selfManage is bool) &&
+        (!('deliveryMethod' in data) || data.deliveryMethod in ['email','link']) &&
+        (!('emailStatus' in data) || data.emailStatus in ['pending','sending','sent','failed','skipped']) &&
+        (!('emailSentAt' in data) || data.emailSentAt is timestamp) &&
+        data.birthDate is string && data.birthDate.size() <= 10 && data.adultAt is timestamp &&
         ((data.mode == 'viewer' && data.birthDate == '') || (data.mode == 'dependent' && data.birthDate.matches('^\\d{4}-\\d{2}-\\d{2}$') && data.adultAt > request.time)) &&
         data.acceptedUid is string && data.acceptedUid.size() <= 128 &&
         data.createdAt is timestamp && data.updatedAt is timestamp;
     }
     function isValidMember(data,memberUid) {
       return hasRequiredFields(data,['memberUid','email','displayName','inviteId','joinedAt']) &&
-        hasOnlyAllowedFields(data,['memberUid','email','displayName','inviteId','joinedAt']) &&
+        hasOnlyAllowedFields(data,['memberUid','email','displayName','inviteId','accountType','familyOwnerUid','joinedAt']) &&
         data.memberUid == memberUid && isValidEmail(data.email) &&
         data.displayName is string && data.displayName.size() <= 120 &&
         data.inviteId is string && data.inviteId.size() == 20 && data.joinedAt is timestamp;
     }
     function isValidConnection(data,ownerUid) {
       return hasRequiredFields(data,['ownerUid','ownerName','inviteId','joinedAt']) &&
-        hasOnlyAllowedFields(data,['ownerUid','ownerName','inviteId','joinedAt']) &&
+        hasOnlyAllowedFields(data,['ownerUid','ownerName','inviteId','accountType','familyOwnerUid','joinedAt']) &&
         data.ownerUid == ownerUid && data.ownerName is string && data.ownerName.size() <= 120 &&
         data.inviteId is string && data.inviteId.size() == 20 && data.joinedAt is timestamp;
     }
@@ -128,15 +173,17 @@ service cloud.firestore {
     }
     function isValidControl(data) {
       return hasRequiredFields(data,['guardianUid','guardianName','birthDate','adultAt','inviteId','createdAt']) &&
-        hasOnlyAllowedFields(data,['guardianUid','guardianName','birthDate','adultAt','inviteId','createdAt']) &&
+        hasOnlyAllowedFields(data,['guardianUid','guardianName','birthDate','adultAt','inviteId','accountType','selfManage','createdAt']) &&
         data.guardianUid is string && data.guardianUid.size() >= 20 && data.guardianUid.size() <= 128 &&
         data.guardianName is string && data.guardianName.size() >= 1 && data.guardianName.size() <= 120 &&
-        data.birthDate is string && data.birthDate.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
-        data.adultAt is timestamp && data.adultAt > request.time && data.inviteId is string && data.inviteId.size() == 20 && data.createdAt is timestamp;
+        data.birthDate is string && data.adultAt is timestamp && data.inviteId is string && data.inviteId.size() == 20 && data.createdAt is timestamp &&
+        ((!('accountType' in data) && data.birthDate.matches('^\\d{4}-\\d{2}-\\d{2}$') && data.adultAt > request.time) ||
+         (data.accountType == 'minor' && data.selfManage == false && data.birthDate.matches('^\\d{4}-\\d{2}-\\d{2}$') && data.adultAt > request.time) ||
+         (data.accountType == 'elderly' && data.selfManage == false && data.birthDate == ''));
     }
     function isValidDependent(data,dependentUid) {
       return hasRequiredFields(data,['dependentUid','displayName','email','birthDate','adultAt','inviteId','joinedAt']) &&
-        hasOnlyAllowedFields(data,['dependentUid','displayName','email','birthDate','adultAt','inviteId','joinedAt']) &&
+        hasOnlyAllowedFields(data,['dependentUid','displayName','email','birthDate','adultAt','inviteId','accountType','familyOwnerUid','joinedAt']) &&
         data.dependentUid == dependentUid && data.displayName is string && data.displayName.size() <= 120 &&
         isValidEmail(data.email) && data.birthDate is string && data.birthDate.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
         data.adultAt is timestamp && data.adultAt > request.time && data.inviteId is string && data.inviteId.size() == 20 && data.joinedAt is timestamp;
@@ -164,7 +211,7 @@ service cloud.firestore {
       allow update: if isOwner(userId) && isValidUser(request.resource.data,userId) &&
         request.resource.data.uid == resource.data.uid && request.resource.data.createdAt == resource.data.createdAt &&
         isRecent(request.resource.data.updatedAt);
-      allow delete: if false;
+      allow delete: if isOwner(userId);
 
       match /medications/{medId} {
         allow read: if canViewAgenda(userId);
@@ -188,7 +235,7 @@ service cloud.firestore {
         allow create: if isAuthenticated() && request.auth.uid == memberUid &&
           isValidMember(request.resource.data,memberUid) && request.resource.data.email == request.auth.token.email &&
           get(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.status == 'pending' &&
-          getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.ownerUid == userId &&
+          getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.familyOwnerUid == userId &&
           getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.acceptedUid == memberUid;
         allow update: if false;
         allow delete: if isOwner(userId) || (isAuthenticated() && request.auth.uid == memberUid);
@@ -216,11 +263,12 @@ service cloud.firestore {
         allow read: if controlId == 'access' && (isOwner(userId) || isGuardian(userId));
         allow create: if controlId == 'access' && isOwner(userId) && isValidControl(request.resource.data) &&
           get(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.status == 'pending' &&
-          getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.mode == 'dependent' &&
-          getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.ownerUid == request.resource.data.guardianUid &&
+          ((getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.mode == 'dependent' && request.resource.data.accountType == 'minor') ||
+           (getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.accountType == 'elderly' && request.resource.data.accountType == 'elderly' && request.resource.data.selfManage == false)) &&
+          getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.familyOwnerUid == request.resource.data.guardianUid &&
           getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.acceptedUid == userId;
         allow update: if false;
-        allow delete: if controlId == 'access' && (isGuardian(userId) || (isOwner(userId) && resource.data.adultAt <= request.time));
+        allow delete: if controlId == 'access' && (isGuardian(userId) || isOwner(userId));
       }
       match /devices/{deviceUid} {
         allow read: if isOwner(userId) || (isAuthenticated() && request.auth.uid == deviceUid);
@@ -243,28 +291,50 @@ service cloud.firestore {
         allow delete: if isOwner(userId) || isPairedDevice(userId);
       }
       match /settings/{settingId} {
-        allow read: if isOwner(userId) && settingId == 'notifications';
-        allow create: if isOwner(userId) && settingId == 'notifications' && isValidSettings(request.resource.data,userId) && isRecent(request.resource.data.updatedAt);
-        allow update: if isOwner(userId) && settingId == 'notifications' && isValidSettings(request.resource.data,userId) && request.resource.data.ownerUid == resource.data.ownerUid && isRecent(request.resource.data.updatedAt);
-        allow delete: if isOwner(userId) && settingId == 'notifications';
+        allow read: if isOwner(userId) && settingId in ['notifications','privacy'];
+        allow create: if isOwner(userId) &&
+          ((settingId == 'notifications' && isValidSettings(request.resource.data,userId)) ||
+           (settingId == 'privacy' && isValidPrivacySettings(request.resource.data,userId))) &&
+          isRecent(request.resource.data.updatedAt);
+        allow update: if isOwner(userId) &&
+          ((settingId == 'notifications' && isValidSettings(request.resource.data,userId)) ||
+           (settingId == 'privacy' && isValidPrivacySettings(request.resource.data,userId))) &&
+          request.resource.data.ownerUid == resource.data.ownerUid && isRecent(request.resource.data.updatedAt);
+        allow delete: if isOwner(userId) && settingId in ['notifications','privacy'];
       }
-      match /deliveries/{deliveryId} { allow read,write: if false; }
+      match /deliveries/{deliveryId} {
+        allow read,delete: if isOwner(userId);
+        allow create,update: if false;
+      }
+      match /family/{documentId} {
+        allow read: if isOwner(userId);
+        allow create,update: if isOwner(userId) && documentId == 'account' &&
+          request.resource.data.keys().hasOnly(['familyOwnerUid','accountType','updatedAt']) &&
+          request.resource.data.familyOwnerUid is string && request.resource.data.familyOwnerUid.size() >= 20 && request.resource.data.familyOwnerUid.size() <= 128 &&
+          request.resource.data.accountType in ['adult','elderly','minor'] && isRecent(request.resource.data.updatedAt);
+        allow delete: if isOwner(userId);
+      }
       match /{document=**} { allow read,write: if false; }
     }
 
     match /invitations/{inviteId} {
       allow get: if isAuthenticated() && (request.auth.uid == resource.data.ownerUid ||
         (request.auth.token.email_verified == true && request.auth.token.email == resource.data.invitedEmail));
-      allow list: if false;
+      allow list: if isAuthenticated() && (request.auth.uid == resource.data.ownerUid ||
+        (request.auth.token.email_verified == true && request.auth.token.email == resource.data.invitedEmail));
       allow create: if isAuthenticated() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
         isValidInvitation(request.resource.data,inviteId) && request.resource.data.ownerUid == request.auth.uid &&
+        request.resource.data.familyOwnerUid == familyIdFor(request.auth.uid) && request.auth.uid == request.resource.data.familyOwnerUid &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)/family/account).data.accountType in ['adult','elderly'] &&
         request.resource.data.status == 'pending' && request.resource.data.acceptedUid == '' &&
         isRecent(request.resource.data.createdAt) && isRecent(request.resource.data.updatedAt);
       allow update: if isAuthenticated() && request.auth.token.email_verified == true &&
         isValidInvitation(request.resource.data,inviteId) && request.auth.token.email == resource.data.invitedEmail &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','acceptedUid','updatedAt']) &&
-        resource.data.status == 'pending' && request.resource.data.status == 'accepted' &&
-        request.resource.data.acceptedUid == request.auth.uid && isRecent(request.resource.data.updatedAt);
+        resource.data.status == 'pending' &&
+        ((request.resource.data.status == 'accepted' && request.resource.data.acceptedUid == request.auth.uid) ||
+         (request.resource.data.status == 'rejected' && request.resource.data.acceptedUid == '')) &&
+        isRecent(request.resource.data.updatedAt);
       allow delete: if isAuthenticated() && request.auth.uid == resource.data.ownerUid;
     }
     match /pairings/{pairId} {
@@ -283,6 +353,32 @@ service cloud.firestore {
         getAfter(/databases/$(database)/documents/users/$(resource.data.ownerUid)/devices/$(request.auth.uid)).data.pairId == pairId &&
         isRecent(request.resource.data.updatedAt);
       allow delete: if isAuthenticated() && request.auth.uid == resource.data.ownerUid;
+    }
+    match /families/{familyId} {
+      allow read: if isAuthenticated() && exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid));
+      allow create: if isAuthenticated() && request.auth.uid == familyId &&
+        request.resource.data.keys().hasOnly(['familyOwnerUid','ownerName','createdAt','updatedAt']) &&
+        request.resource.data.familyOwnerUid == familyId && request.resource.data.ownerName is string && request.resource.data.ownerName.size() <= 120 &&
+        isRecent(request.resource.data.createdAt) && isRecent(request.resource.data.updatedAt);
+      allow update,delete: if false;
+      match /members/{memberUid} {
+        allow read: if isAuthenticated() && (request.auth.uid == memberUid ||
+          (exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)) &&
+           get(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)).data.accountType in ['adult','elderly']));
+        allow create: if isAuthenticated() && request.auth.uid == memberUid &&
+          request.resource.data.keys().hasOnly(['uid','displayName','email','accountType','selfManage','guardianUid','inviteId','joinedAt']) &&
+          request.resource.data.uid == memberUid && request.resource.data.displayName is string && request.resource.data.displayName.size() <= 120 &&
+          isValidEmail(request.resource.data.email) && request.resource.data.accountType in ['adult','elderly','minor'] &&
+          request.resource.data.inviteId is string && isRecent(request.resource.data.joinedAt) &&
+          ((familyId == request.auth.uid && request.resource.data.inviteId == '') ||
+           (request.resource.data.inviteId.size() == 20 &&
+            get(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.status == 'pending' &&
+            get(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.familyOwnerUid == familyId &&
+            get(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.invitedEmail == request.auth.token.email &&
+            getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.status == 'accepted' &&
+            getAfter(/databases/$(database)/documents/invitations/$(request.resource.data.inviteId)).data.acceptedUid == memberUid));
+        allow update,delete: if false;
+      }
     }
     match /{document=**} { allow read,write: if false; }
   }
